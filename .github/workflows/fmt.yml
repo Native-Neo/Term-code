@@ -2,8 +2,6 @@ name: Format
 on:
   push:
   pull_request:
-permissions:
-  contents: write
 jobs:
   fmt:
     runs-on: ubuntu-latest
@@ -12,14 +10,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: |
-          python3 -c "from pathlib import Path; p=Path('src/main.rs'); s=p.read_text(); s=s.replace('format!(\"Term Code  •  {}  •  {}\",','format!(\"  {}  ·  {}\",'); s=s.replace('.alignment(Alignment::Center)',''); s=s.replace('format!(\"> {}\", a.input)','format!(\"› {}\", a.input)'); s=s.replace('if m.role == \"user\" { \"You\" } else { \"Term Code\" }','if m.role == \"user\" { \"› You\" } else { \"• Term Code\" }'); s=s.replace('.highlight_symbol(\"> \")','.highlight_symbol(\"› \" )'); s=s.replace('Block::default().borders(Borders::NONE).title(title)','Block::default().borders(Borders::NONE).title(Span::styled(title, Style::default().cyan().bold()))'); p.write_text(s)"
-          cargo fmt
-      - run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main.rs
-          git commit -m "Refine Codex-style terminal UI"
-          git push
       - run: cargo fmt --check
-      - run: cargo check
