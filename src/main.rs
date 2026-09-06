@@ -818,32 +818,21 @@ fn api_error(v: &Value, s: StatusCode) -> String {
 
 fn draw(f: &mut Frame, a: &App) {
     let l = Layout::vertical([
-        Constraint::Length(2),
         Constraint::Min(4),
         Constraint::Length(3),
         Constraint::Length(1),
     ])
     .split(f.area());
-    let head = if matches!(a.mode, Mode::Chat) {
-        format!(
-            "Term Code  •  {}  •  {}",
-            PROVIDERS[a.provider].name,
-            a.config.model.as_deref().unwrap_or("auto")
-        )
-    } else {
-        "Term Code".into()
-    };
-    f.render_widget(Paragraph::new(head), l[0]);
     match a.mode {
-        Mode::Chat => chat(f, a, l[1]),
-        Mode::Setup(step) => setup(f, a, l[1], step),
-        Mode::Models => list(f, &a.models, &a.model_state, l[1], "Models"),
+        Mode::Chat => chat(f, a, l[0]),
+        Mode::Setup(step) => setup(f, a, l[0], step),
+        Mode::Models => list(f, &a.models, &a.model_state, l[0], "Models"),
         Mode::Providers => {
             let v = PROVIDERS
                 .iter()
                 .map(|p| p.name.to_owned())
                 .collect::<Vec<_>>();
-            list(f, &v, &a.provider_state, l[1], "Providers");
+            list(f, &v, &a.provider_state, l[0], "Providers");
         }
     }
     let input = match a.mode {
@@ -854,11 +843,11 @@ fn draw(f: &mut Frame, a: &App) {
     };
     f.render_widget(
         Paragraph::new(input).block(Block::default().borders(Borders::NONE)),
-        l[2],
+        l[1],
     );
     f.render_widget(
         Paragraph::new(a.error.as_deref().unwrap_or(&a.status)),
-        l[3],
+        l[2],
     );
 }
 fn chat(f: &mut Frame, a: &App, r: Rect) {
