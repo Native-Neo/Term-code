@@ -508,6 +508,7 @@ fn send(app: &mut App, tx: &mpsc::Sender<EventMsg>) {
     app.status = "Thinking...".into();
     let cfg = app.config.clone();
     let hist = app.messages.clone();
+    let tx = tx.clone();
     tokio::spawn(async move {
         if let Err(e) = request(&cfg, &hist, tx.clone(), id).await {
             let _ = tx.send(EventMsg::Error(id, e));
@@ -592,7 +593,7 @@ async fn list_models(c: &Config) -> Result<Vec<String>, String> {
             .map(|a| {
                 a.iter()
                     .filter_map(|x| x["id"].as_str().map(str::to_owned))
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default()
     } else {
@@ -615,7 +616,7 @@ async fn list_models(c: &Config) -> Result<Vec<String>, String> {
                     .map(|a| {
                         a.iter()
                             .filter_map(|x| x["id"].as_str().map(str::to_owned))
-                            .collect()
+                            .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
             }
@@ -645,7 +646,7 @@ async fn list_models(c: &Config) -> Result<Vec<String>, String> {
                                     .as_str()
                                     .map(|n| n.trim_start_matches("models/").to_owned())
                             })
-                            .collect()
+                            .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
             }
@@ -681,7 +682,7 @@ async fn openai(
     let msgs: Vec<Value> = hist
         .iter()
         .map(|m| json!({"role":m.role,"content":m.content}))
-        .collect();
+        .collect::<Vec<_>>();
     let h = http().await?;
     let r = h
         .post(format!("{b}/chat/completions"))
@@ -707,7 +708,7 @@ async fn anthropic(
         .iter()
         .filter(|m| m.role != "system")
         .map(|m| json!({"role":m.role,"content":m.content}))
-        .collect();
+        .collect::<Vec<_>>();
     let h = http().await?;
     let r = h
         .post("https://api.anthropic.com/v1/messages")
@@ -730,7 +731,7 @@ async fn google(
     id: u64,
 ) -> Result<(), String> {
     let model = c.model.as_deref().ok_or("No model selected")?;
-    let contents: Vec<Value> = hist.iter().map(|m| json!({"role":if m.role == "assistant" { "model" } else { "user" },"parts":[{"text":m.content}]})).collect();
+    let contents: Vec<Value> = hist.iter().map(|m| json!({"role":if m.role == "assistant" { "model" } else { "user" },"parts":[{"text":m.content}]})).collect::<Vec<_>>();
     let h = http().await?;
     let r = h
         .post(format!(
