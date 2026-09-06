@@ -1,0 +1,184 @@
+use std::{fs, io, path::PathBuf, sync::mpsc, time::{Duration, SystemTime, UNIX_EPOCH}};
+use chrono::{Local, Timelike};
+use crossterm::{event::{self, Event, KeyCode, KeyEvent, KeyModifiers}, execute, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}};
+use futures_util::StreamExt;
+use ratatui::{prelude::*, widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap}};
+use reqwest::{Client, StatusCode};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+const DIR: &str = ".nativestuff";
+const FILE: &str = "Config.json";
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Config {
+    provider: String,
+    api_key: String,
+    #[serde(default)] model: Option<String>,
+    #[serde(default)] user_name: Option<String>,
+}
+
+struct Provider { id: &'static str, name: &'static str }
+const PROVIDERS: &[Provider] = &[
+    Provider { id: "openai", name: "OpenAI" },
+    Provider { id: "anthropic", name: "Anthropic" },
+    Provider { id: "google", name: "Google" },
+    Provider { id: "deepseek", name: "DeepSeek" },
+    Provider { id: "qwen", name: "Alibaba/Qwen" },
+    Provider { id: "openrouter", name: "OpenRouter" },
+    Provider { id: "zhipu", name: "Zhipu AI" },
+];
+
+#[derive(Clone)] struct Msg { role: String, content: String }
+enum EventMsg { Chunk(String), Done, Error(String), Models(Vec<String>) }
+
+enum Mode { Chat, Setup(u8), Models, Providers }
+struct App {
+    config: Config,
+    messages: Vec<Msg>, input: String, status: String, error: Option<String>, busy: bool,
+    mode: Mode, provider: usize, models: Vec<String>, model_state: ListState, provider_state: ListState,
+    api_input: String, name_input: String, greeting: String, scroll: u16,
+}
+
+impl App {
+    fn new(config: Config, setup: bool) -> Self {
+        let provider = PROVIDERS.iter().position(|p| p.id == config.provider).unwrap_or(0);
+        let name = config.user_name.as_deref();
+        Self { config, messages: Vec::new(), input: String::new(), status: if setup { "Choose a provider" } else { "Ready" }.into(), error: None, busy: false,
+            mode: if setup { Mode::Setup(0) } else { Mode::Chat }, provider, models: Vec::new(), model_state: ListState::default(), provider_state: ListState::default(),
+            api_input: String::new(), name_input: name.unwrap_or_default().into(), greeting: greeting(name), scroll: 0 }
+    }
+    fn save(&self) -> Result<(), String> {
+        let dir = home().join(DIR); fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        fs::write(dir.join(FILE), serde_json::to_string_pretty(&self.config).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; let _ = fs::set_permissions(dir.join(FILE), fs::Permissions::from_mode(0o600)); }
+        Ok(())
+    }
+}
+
+fn home() -> PathBuf { std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| ".".into()) }
+fn load() -> Result<Option<Config>, String> {
+    let p = home().join(DIR).join(FILE); if !p.exists() { return Ok(None); }
+    let s = fs::read_to_string(p).map_err(|e| e.to_string())?;
+    let c: Config = serde_json::from_str(&s).map_err(|e| format!("Wrong Config.json formatting: {e}"))?;
+    if c.provider.trim().is_empty() || c.api_key.trim().is_empty() { return Err("Wrong Config.json formatting: provider and api_key are required".into()); }
+    Ok(Some(c))
+}
+fn greeting(name: Option<&str>) -> String {
+    let n = name.map(|x| format!(", {x}")).unwrap_or_default();
+    let h = Local::now().hour();
+    let v = if h < 12 { [format!("Good morning{n}."), format!("What should we work on{n}?")] }
+        else if h < 18 { [format!("Good afternoon{n}."), format!("What should we do{n}?")] }
+        else { [format!("Good evening{n}."), format!("Good to see you back{n}.")] };
+    v[(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as usize) % 2].clone()
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = match load() { Ok(Some(c)) => c, Ok(None) => Config { provider: PROVIDERS[0].id.into(), api_key: String::new(), model: None, user_name: None }, Err(e) => Config { provider: PROVIDERS[0].id.into(), api_key: String::new(), model: None, user_name: None } };
+    let setup = config.api_key.is_empty();
+    let mut app = App::new(config, setup);
+    if let Err(e) = load_models(&mut app).await { if !setup { app.error = Some(e); } }
+    let (tx, rx) = mpsc::channel();
+    run(&mut app, tx, rx)?;
+    Ok(())
+}
+
+fn run(app: &mut App, tx: mpsc::Sender<EventMsg>, rx: mpsc::Receiver<EventMsg>) -> io::Result<()> {
+    enable_raw_mode()?; let mut out = io::stdout(); execute!(out, EnterAlternateScreen)?;
+    let mut term = Terminal::new(CrosstermBackend::new(out))?;
+    let result = loop_app(&mut term, app, tx, rx);
+    disable_raw_mode()?; execute!(term.backend_mut(), LeaveAlternateScreen)?; term.show_cursor()?; result
+}
+
+fn loop_app<B: Backend>(term: &mut Terminal<B>, app: &mut App, tx: mpsc::Sender<EventMsg>, rx: mpsc::Receiver<EventMsg>) -> io::Result<()> {
+    loop {
+        while let Ok(e) = rx.try_recv() { match e {
+            EventMsg::Chunk(s) => if let Some(m) = app.messages.last_mut() { m.content.push_str(&s); },
+            EventMsg::Done => { app.busy = false; app.status = "Ready".into(); },
+            EventMsg::Error(e) => { app.busy = false; app.error = Some(e); app.status = "Error".into(); if app.messages.last().is_some_and(|m| m.content.is_empty()) { app.messages.pop(); } },
+            EventMsg::Models(v) => { app.models = v; app.model_state.select(Some(0)); app.busy = false; app.status = "Ready".into(); choose_model(app); }
+        }}
+        term.draw(|f| draw(f, app))?;
+        if event::poll(Duration::from_millis(40))? { if let Event::Key(k) = event::read()? { if key(app, k, &tx) { break; } } }
+    }
+    Ok(())
+}
+
+fn key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
+    if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) { return true; }
+    match app.mode {
+        Mode::Setup(step) => return setup_key(app, k, step),
+        Mode::Models => { model_key(app, k); return false; },
+        Mode::Providers => { provider_key(app, k); return false; },
+        Mode::Chat => {}
+    }
+    if k.code == KeyCode::Enter {
+        if app.input.starts_with('/') { return command(app, tx); }
+        if !app.busy && !app.input.trim().is_empty() { send(app, tx); }
+        return false;
+    }
+    match k.code {
+        KeyCode::Esc if app.busy => { app.status = "Cancelled".into(); app.busy = false; },
+        KeyCode::Esc => return true,
+        KeyCode::Backspace => { app.input.pop(); },
+        KeyCode::Up if app.input.is_empty() => app.scroll = app.scroll.saturating_add(1),
+        KeyCode::Down if app.input.is_empty() => app.scroll = app.scroll.saturating_sub(1),
+        KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => app.input.push(c),
+        _ => {}
+    }
+    false
+}
+
+fn setup_key(app: &mut App, k: KeyEvent, step: u8) -> bool {
+    match step {
+        0 => match k.code { KeyCode::Up => app.provider = app.provider.saturating_sub(1), KeyCode::Down => app.provider = (app.provider + 1).min(PROVIDERS.len()-1), KeyCode::Enter => { app.mode = Mode::Setup(1); app.status = "Paste your API key".into(); }, KeyCode::Esc => return true, _ => {} },
+        1 => text(&mut app.api_input, k, || { app.mode = Mode::Setup(2); app.status = "What should I call you?".into(); }),
+        2 => text(&mut app.name_input, k, || { let id = PROVIDERS[app.provider].id; app.config.provider = id.into(); app.config.api_key = app.api_input.trim().into(); app.config.user_name = (!app.name_input.trim().is_empty()).then(|| app.name_input.trim().into()); app.config.model = None; if let Err(e) = app.save() { app.error = Some(e); } app.greeting = greeting(app.config.user_name.as_deref()); app.mode = Mode::Chat; app.status = "Loading models...".into(); }),
+        _ => {}
+    }
+    false
+}
+fn text(s: &mut String, k: KeyEvent, enter: impl FnOnce()) { match k.code { KeyCode::Enter => enter(), KeyCode::Backspace => { s.pop(); }, KeyCode::Char(c) => s.push(c), _ => {} } }
+
+fn command(app: &mut App, tx: &mpsc::Sender<EventMsg>) -> bool {
+    let c = app.input.trim().to_lowercase(); app.input.clear();
+    match c.as_str() {
+        "/help" => app.status = "/model /provider /config /new /clear /quit".into(),
+        "/model" => { app.mode = Mode::Models; if app.models.is_empty() { refresh_async(app, tx.clone()); } },
+        "/provider" => { app.provider_state.select(Some(app.provider)); app.mode = Mode::Providers; },
+        "/config" => app.status = format!("Provider: {} | Model: {} | API key: configured", PROVIDERS[app.provider].name, app.config.model.as_deref().unwrap_or("auto")),
+        "/new" | "/clear" => { app.messages.clear(); app.scroll = 0; },
+        "/quit" | "/exit" => return true,
+        _ => app.status = format!("Unknown command: {c}"),
+    }
+    false
+}
+fn model_key(app: &mut App, k: KeyEvent) { match k.code { KeyCode::Esc => app.mode = Mode::Chat, KeyCode::Up => app.model_state.select(Some(app.model_state.selected().unwrap_or(0).saturating_sub(1))), KeyCode::Down => { let i=app.model_state.selected().unwrap_or(0); if i+1<app.models.len(){app.model_state.select(Some(i+1));} }, KeyCode::Enter => { if let Some(i)=app.model_state.selected(){if let Some(m)=app.models.get(i).cloned(){app.config.model=Some(m);let _=app.save();app.mode=Mode::Chat;}}}, _=>{} } }
+fn provider_key(app: &mut App, k: KeyEvent) { match k.code { KeyCode::Esc => app.mode=Mode::Chat, KeyCode::Up=>app.provider_state.select(Some(app.provider_state.selected().unwrap_or(0).saturating_sub(1))), KeyCode::Down=>{let i=app.provider_state.selected().unwrap_or(0);if i+1<PROVIDERS.len(){app.provider_state.select(Some(i+1));}}, KeyCode::Enter=>{if let Some(i)=app.provider_state.selected(){app.provider=i;app.api_input.clear();app.mode=Mode::Setup(1);app.status="Paste your API key".into();}}, _=>{} } }
+
+fn send(app: &mut App, tx: &mpsc::Sender<EventMsg>) {
+    let text = app.input.trim().to_string(); app.input.clear(); app.error=None;
+    app.messages.push(Msg { role:"user".into(), content:text }); app.messages.push(Msg { role:"assistant".into(), content:String::new() }); app.busy=true; app.status="Thinking...".into();
+    let cfg=app.config.clone(); let hist=app.messages.clone(); let tx=tx.clone();
+    tokio::spawn(async move { if let Err(e)=request(&cfg,&hist,tx.clone()).await { let _=tx.send(EventMsg::Error(e)); } });
+}
+fn refresh_async(app:&mut App,tx:mpsc::Sender<EventMsg>){let cfg=app.config.clone();app.busy=true;std::thread::spawn(move||{let rt=tokio::runtime::Runtime::new().unwrap();let _=tx.send(match rt.block_on(list_models(&cfg)){Ok(v)=>EventMsg::Models(v),Err(e)=>EventMsg::Error(e)});});}
+async fn load_models(app:&mut App)->Result<(),String>{let v=list_models(&app.config).await?;app.models=v;app.model_state.select(Some(0));choose_model(app);Ok(())}
+fn choose_model(app:&mut App){if let Some(c)=app.config.model.as_ref(){if app.models.contains(c){return;}}if let Some(m)=app.models.first().cloned(){app.config.model=Some(m);let _=app.save();}}
+
+async fn http()->Result<Client,String>{Client::builder().user_agent("term-code/0.1").timeout(Duration::from_secs(120)).build().map_err(|e|e.to_string())}
+fn base(c:&Config)->Option<&'static str>{match c.provider.as_str(){"openai"=>Some("https://api.openai.com/v1"),"deepseek"=>Some("https://api.deepseek.com"),"qwen"=>Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),"openrouter"=>Some("https://openrouter.ai/api/v1"),"zhipu"=>Some("https://open.bigmodel.cn/api/paas/v4"),_=>None}}
+async fn list_models(c:&Config)->Result<Vec<String>,String>{let h=http().await?;if let Some(b)=base(c){let r=h.get(format!("{b}/models")).bearer_auth(&c.api_key).send().await.map_err(|e|e.to_string())?;let s=r.status();let v:Value=r.json().await.map_err(|e|e.to_string())?;if !s.is_success(){return Err(api_error(&v,s));}return Ok(v["data"].as_array().map(|a|a.iter().filter_map(|x|x["id"].as_str().map(str::to_owned)).collect()).unwrap_or_default());}match c.provider.as_str(){"anthropic"=>{let r=h.get("https://api.anthropic.com/v1/models").header("x-api-key",&c.api_key).header("anthropic-version","2023-06-01").send().await.map_err(|e|e.to_string())?;let s=r.status();let v:Value=r.json().await.map_err(|e|e.to_string())?;if !s.is_success(){return Err(api_error(&v,s));}Ok(v["data"].as_array().map(|a|a.iter().filter_map(|x|x["id"].as_str().map(str::to_owned)).collect()).unwrap_or_default())},"google"=>{let r=h.get(format!("https://generativelanguage.googleapis.com/v1beta/models?key={}",c.api_key)).send().await.map_err(|e|e.to_string())?;let s=r.status();let v:Value=r.json().await.map_err(|e|e.to_string())?;if !s.is_success(){return Err(api_error(&v,s));}Ok(v["models"].as_array().map(|a|a.iter().filter_map(|x|x["name"].as_str().map(|n|n.trim_start_matches("models/").to_owned())).filter(|x|x.contains("generateContent")).collect()).unwrap_or_default())},_=>Err("Unsupported provider".into())}}
+
+async fn request(c:&Config,hist:&[Msg],tx:mpsc::Sender<EventMsg>)->Result<(),String>{match c.provider.as_str(){"anthropic"=>anthropic(c,hist,tx).await,"google"=>google(c,hist,tx).await,_=>openai(c,hist,tx).await}}
+async fn openai(c:&Config,hist:&[Msg],tx:mpsc::Sender<EventMsg>)->Result<(),String>{let b=base(c).ok_or("Provider endpoint unavailable")?;let model=c.model.as_deref().ok_or("No model selected")?;let h=http().await?;let msgs:Vec<Value>=hist.iter().map(|m|json!({"role":m.role,"content":m.content})).collect();let r=h.post(format!("{b}/chat/completions")).bearer_auth(&c.api_key).json(&json!({"model":model,"messages":msgs,"stream":true})).send().await.map_err(|e|e.to_string())?;let s=r.status();if !s.is_success(){let v=r.json::<Value>().await.unwrap_or_default();return Err(api_error(&v,s));}sse(r.bytes_stream(),tx,"/choices/0/delta/content").await}
+async fn anthropic(c:&Config,hist:&[Msg],tx:mpsc::Sender<EventMsg>)->Result<(),String>{let model=c.model.as_deref().ok_or("No model selected")?;let h=http().await?;let msgs:Vec<Value>=hist.iter().filter(|m|m.role!="system").map(|m|json!({"role":m.role,"content":m.content})).collect();let r=h.post("https://api.anthropic.com/v1/messages").header("x-api-key",&c.api_key).header("anthropic-version","2023-06-01").json(&json!({"model":model,"max_tokens":4096,"messages":msgs,"stream":true})).send().await.map_err(|e|e.to_string())?;let s=r.status();if !s.is_success(){let v=r.json::<Value>().await.unwrap_or_default();return Err(api_error(&v,s));}sse(r.bytes_stream(),tx,"/delta/text").await}
+async fn google(c:&Config,hist:&[Msg],tx:mpsc::Sender<EventMsg>)->Result<(),String>{let model=c.model.as_deref().ok_or("No model selected")?;let h=http().await?;let contents:Vec<Value>=hist.iter().map(|m|json!({"role":if m.role=="assistant"{"model"}else{"user"},"parts":[{"text":m.content}]})).collect();let r=h.post(format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={}",c.api_key)).json(&json!({"contents":contents})).send().await.map_err(|e|e.to_string())?;let s=r.status();let v:Value=r.json().await.map_err(|e|e.to_string())?;if !s.is_success(){return Err(api_error(&v,s));}if let Some(x)=v.pointer("/candidates/0/content/parts/0/text").and_then(Value::as_str){let _=tx.send(EventMsg::Chunk(x.into()));}let _=tx.send(EventMsg::Done);Ok(())}
+async fn sse<S>(mut stream:S,tx:mpsc::Sender<EventMsg>,path:&str)->Result<(),String>where S:StreamExt<Item=Result<bytes::Bytes,reqwest::Error>>+Unpin{let mut buf=String::new();while let Some(x)=stream.next().await{buf.push_str(&String::from_utf8_lossy(&x.map_err(|e|e.to_string())?));while let Some(p)=buf.find("\n\n"){let block=buf[..p].to_owned();buf.drain(..p+2);for line in block.lines(){let d=line.strip_prefix("data: ").unwrap_or("");if d=="[DONE]"{let _=tx.send(EventMsg::Done);return Ok(());}if let Ok(v)=serde_json::from_str::<Value>(d){if let Some(s)=v.pointer(path).and_then(Value::as_str){let _=tx.send(EventMsg::Chunk(s.into()));}}}}}let _=tx.send(EventMsg::Done);Ok(())}
+fn api_error(v:&Value,s:StatusCode)->String{v.pointer("/error/message").and_then(Value::as_str).or_else(||v.get("message").and_then(Value::as_str)).map(|x|format!("API error ({s}): {x}")).unwrap_or_else(||format!("API error: {s}"))}
+
+fn draw(f:&mut Frame,a:&App){let l=Layout::vertical([Constraint::Length(2),Constraint::Min(4),Constraint::Length(3),Constraint::Length(1)]).split(f.area());let head=if matches!(a.mode,Mode::Chat){format!("Term Code  •  {}  •  {}",PROVIDERS[a.provider].name,a.config.model.as_deref().unwrap_or("auto"))}else{"Term Code".into()};f.render_widget(Paragraph::new(head).alignment(Alignment::Center).bold(),l[0]);match a.mode{Mode::Chat=>chat(f,a,l[1]),Mode::Setup(step)=>setup(f,a,l[1],step),Mode::Models=>list(f,&a.models,&a.model_state,l[1],"Models"),Mode::Providers=>{let v=PROVIDERS.iter().map(|p|p.name.to_owned()).collect::<Vec<_>>();list(f,&v,&a.provider_state,l[1],"Providers")}}let input=match a.mode{Mode::Setup(1)=>format!("API key: {}","•".repeat(a.api_input.chars().count())),Mode::Setup(2)=>format!("Name: {}",a.name_input),_=>format!("> {}",a.input)};f.render_widget(Paragraph::new(input).block(Block::default().borders(Borders::ALL)),l[2]);f.render_widget(Paragraph::new(a.error.as_deref().unwrap_or(&a.status)),l[3]);}
+fn chat(f:&mut Frame,a:&App,r:Rect){let mut s=a.messages.iter().map(|m|format!("{}:\n{}\n",if m.role=="user"{"You"}else{"Term Code"},m.content)).collect::<Vec<_>>().join("\n");if s.is_empty(){s=a.greeting.clone();}f.render_widget(Paragraph::new(s).scroll((a.scroll,0)).wrap(Wrap{trim:false}).block(Block::default().borders(Borders::ALL)),r)}
+fn setup(f:&mut Frame,a:&App,r:Rect,step:u8){let title=match step{0=>"Select provider",1=>"API key",2=>"Your name",_=>"Setup"};let text=match step{0=>PROVIDERS.iter().map(|p|p.name).collect::<Vec<_>>().join("\n"),1=>"Paste your API key, then press Enter.".into(),2=>"Enter the name Term Code should call you.".into(),_=>String::new()};f.render_widget(Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(title)),r)}
+fn list(f:&mut Frame,v:&[String],st:&ListState,r:Rect,title:&str){let mut s=st.clone();f.render_stateful_widget(List::new(v.iter().map(|x|ListItem::new(x.clone())).collect::<Vec<_>>()).block(Block::default().borders(Borders::ALL).title(title)),r,&mut s)}
