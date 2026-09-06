@@ -1,13 +1,155 @@
 name: Format
 on:
   push:
-  pull_request:
 jobs:
-  fmt:
+  redesign:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Redesign chat UI
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/main.rs')
+          s = p.read_text()
+          start = s.index('fn draw(')
+          replacement = r'''fn draw(f: &mut Frame, a: &App) {
+    let l = Layout::vertical([
+        Constraint::Min(4),
+        Constraint::Length(3),
+        Constraint::Length(1),
+    ])
+    .split(f.area());
+    match a.mode {
+        Mode::Chat => chat(f, a, l[0]),
+        Mode::Setup(step) => setup(f, a, l[0], step),
+        Mode::Models => list(f, &a.models, &a.model_state, l[0], "Models"),
+        Mode::Providers => {
+            let v = PROVIDERS.iter().map(|p| p.name.to_owned()).collect::<Vec<_>>();
+            list(f, &v, &a.provider_state, l[0], "Providers");
+        }
+    }
+    let input = match a.mode {
+        Mode::Setup(1) => format!("› API key: {}", "•".repeat(a.api_input.chars().count())),
+        Mode::Setup(2) => format!("› Name: {}", a.name_input),
+        Mode::Setup(3) => "Config.json is invalid. Press Esc or Q to exit.".into(),
+        _ => format!("› {}", a.input),
+    };
+    f.render_widget(Paragraph::new(input), l[1]);
+    let footer = if let Some(error) = &a.error {
+        error.clone()
+    } else {
+        format!(
+            "{} · {} · {}",
+            PROVIDERS[a.provider].name,
+            a.config.model.as_deref().unwrap_or("auto"),
+            a.status
+        )
+    };
+    f.render_widget(Paragraph::new(footer).alignment(Alignment::Right), l[2]);
+}
+fn chat(f: &mut Frame, a: &App, r: Rect) {
+    if a.messages.is_empty() {
+        let area = centered_rect(r, 2, 4);
+        let text = Text::from(vec![
+            Line::from(Span::styled("Term Code", Style::default().magenta().bold())),
+            Line::from(a.greeting.as_str()),
+        ]);
+        f.render_widget(Paragraph::new(text).alignment(Alignment::Center), area);
+        return;
+    }
+    let mut lines = Vec::new();
+    for m in &a.messages {
+        let (label, style) = if m.role == "user" {
+            ("› You", Style::default().cyan().bold())
+        } else {
+            ("• Term Code", Style::default().magenta().bold())
+        };
+        lines.push(Line::from(Span::styled(label, style)));
+        for line in m.content.lines() {
+            lines.push(Line::from(format!("  {line}")));
+        }
+        lines.push(Line::from(""));
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .scroll((a.scroll, 0))
+            .wrap(Wrap { trim: false }),
+        r,
+    );
+}
+fn centered_rect(r: Rect, width_percent: u16, height: u16) -> Rect {
+    let h = height.min(r.height);
+    let area = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(h),
+        Constraint::Fill(1),
+    ])
+    .split(r)[1];
+    Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Percentage(width_percent),
+        Constraint::Fill(1),
+    ])
+    .split(area)[1]
+}
+fn setup(f: &mut Frame, a: &App, r: Rect, step: u8) {
+    let title = match step {
+        0 => "Select provider",
+        1 => "API key",
+        2 => "Your name",
+        3 => "Invalid configuration",
+        _ => "Setup",
+    };
+    let text = match step {
+        0 => PROVIDERS
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("{} {}", if i == a.provider { "›" } else { " " }, p.name))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        1 => "Paste your API key, then press Enter.".into(),
+        2 => "Enter the name Term Code should call you.".into(),
+        3 => a.error.clone().unwrap_or_else(|| "Invalid Config.json".into()),
+        _ => String::new(),
+    };
+    f.render_widget(
+        Paragraph::new(text).block(
+            Block::default()
+                .borders(Borders::NONE)
+                .title(Span::styled(title, Style::default().cyan().bold())),
+        ),
+        r,
+    );
+}
+fn list(f: &mut Frame, v: &[String], st: &ListState, r: Rect, title: &str) {
+    let mut s = st.clone();
+    f.render_stateful_widget(
+        List::new(v.iter().map(|x| ListItem::new(x.clone())).collect::<Vec<_>>())
+            .highlight_symbol("› ")
+            .block(
+                Block::default()
+                    .borders(Borders::NONE)
+                    .title(Span::styled(title, Style::default().cyan().bold())),
+            ),
+        r,
+        &mut s,
+    );
+}
+'''
+          p.write_text(s[:start] + replacement)
+          PY
       - run: cargo fmt --check
+      - run: cargo check
+      - name: Commit source change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.rs
+          git commit -m "Redesign TUI toward OpenCode style"
+          git push
