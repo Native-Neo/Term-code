@@ -2,8 +2,6 @@ name: Format
 on:
   push:
   pull_request:
-permissions:
-  contents: write
 jobs:
   fmt:
     runs-on: ubuntu-latest
@@ -12,58 +10,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          p = Path("src/main.rs")
-          s = p.read_text()
-          old = re.search(r'            "google" => \{.*?            \}\n            _ => return Err\("Unsupported provider"\.into\(\)\),', s, re.S)
-          if not old:
-              raise SystemExit("google model branch not found")
-          new = '''            "google" => {
-                let mut models = Vec::new();
-                let mut page_token = None;
-                loop {
-                    let mut req = h
-                        .get("https://generativelanguage.googleapis.com/v1beta/models")
-                        .header("x-goog-api-key", &c.api_key)
-                        .query(&[("pageSize", "1000")]);
-                    if let Some(token) = &page_token {
-                        req = req.query(&[("pageToken", token)]);
-                    }
-                    let r = req.send().await.map_err(|e| e.to_string())?;
-                    let status = r.status();
-                    let v: Value = r.json().await.map_err(|e| e.to_string())?;
-                    if !status.is_success() {
-                        return Err(api_error(&v, status));
-                    }
-                    if let Some(items) = v["models"].as_array() {
-                        models.extend(items.iter().filter(|x| {
-                            x["supportedGenerationMethods"].as_array().is_some_and(|m| {
-                                m.iter().any(|v| v.as_str() == Some("generateContent"))
-                            })
-                        }).filter_map(|x| {
-                            x["name"].as_str().map(|n| n.trim_start_matches("models/").to_owned())
-                        }));
-                    }
-                    page_token = v["nextPageToken"].as_str().map(str::to_owned);
-                    if page_token.is_none() {
-                        break;
-                    }
-                }
-                models
-            }
-            _ => return Err("Unsupported provider".into()),'''
-          s = s[:old.start()] + new + s[old.end():]
-          p.write_text(s)
-          PY
-          cargo fmt
-      - name: Commit fix
-        run: |
-          if git diff --quiet -- src/main.rs; then exit 0; fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main.rs
-          git commit -m "Paginate Gemini model discovery"
-          git push
+      - run: cargo fmt --check
