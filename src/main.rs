@@ -853,7 +853,7 @@ fn draw(f: &mut Frame, a: &App) {
         _ => format!("> {}", a.input),
     };
     f.render_widget(
-        Paragraph::new(input).block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(input).block(Block::default().borders(Borders::NONE)),
         l[2],
     );
     f.render_widget(
@@ -881,7 +881,7 @@ fn chat(f: &mut Frame, a: &App, r: Rect) {
         Paragraph::new(s)
             .scroll((a.scroll, 0))
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL)),
+            .block(Block::default().borders(Borders::NONE)),
         r,
     );
 }
@@ -909,7 +909,7 @@ fn setup(f: &mut Frame, a: &App, r: Rect, step: u8) {
         _ => String::new(),
     };
     f.render_widget(
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(title)),
+        Paragraph::new(text).block(Block::default().borders(Borders::NONE).title(title)),
         r,
     );
 }
@@ -922,7 +922,7 @@ fn list(f: &mut Frame, v: &[String], st: &ListState, r: Rect, title: &str) {
                 .collect::<Vec<_>>(),
         )
         .highlight_symbol("> ")
-        .block(Block::default().borders(Borders::ALL).title(title)),
+        .block(Block::default().borders(Borders::NONE).title(title)),
         r,
         &mut s,
     );
