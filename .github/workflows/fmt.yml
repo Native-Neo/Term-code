@@ -5,28 +5,9 @@ on:
 jobs:
   fmt:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Rename header label
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('src/main.rs')
-          s = p.read_text()
-          s = s.replace('format!("Term Code  •  {}  •  {}",', 'format!("Term Code  :  {}  •  {}",')
-          p.write_text(s)
-          PY
-      - run: cargo fmt
-      - run: cargo check
-      - name: Commit source change
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main.rs
-          git diff --cached --quiet || git commit -m "Use colon model label"
-          git push
+      - run: cargo fmt --check
