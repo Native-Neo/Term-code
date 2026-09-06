@@ -42,10 +42,10 @@ struct App {
 impl App {
     fn new(config: Config, setup: bool, error: Option<String>) -> Self {
         let provider = PROVIDERS.iter().position(|p| p.id == config.provider).unwrap_or(0);
-        let name = config.user_name.as_deref();
+        let name = config.user_name.clone();
         Self { config, messages: Vec::new(), input: String::new(), status: if setup { "Choose a provider" } else if error.is_some() { "Fix Config.json and restart" } else { "Ready" }.into(), error,
             busy: false, mode: if setup { Mode::Setup(0) } else { Mode::Setup(3) }, provider, models: Vec::new(), model_state: ListState::default(), provider_state: ListState::default(),
-            api_input: String::new(), name_input: name.unwrap_or_default().into(), greeting: greeting(name), scroll: 0, request_id: 0 }
+            api_input: String::new(), name_input: name.clone().unwrap_or_default(), greeting: greeting(name.as_deref()), scroll: 0, request_id: 0 }
     }
     fn save(&self) -> Result<(), String> {
         let dir = home().join(DIR); fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -140,7 +140,24 @@ fn setup_key(app: &mut App, k: KeyEvent, step: u8, tx: &mpsc::Sender<EventMsg>) 
     match step {
         0 => match k.code { KeyCode::Up => app.provider = app.provider.saturating_sub(1), KeyCode::Down => app.provider = (app.provider + 1).min(PROVIDERS.len()-1), KeyCode::Enter => { app.mode = Mode::Setup(1); app.status = "Paste your API key".into(); }, KeyCode::Esc => return true, _ => {} },
         1 => text(&mut app.api_input, k, || { app.mode = Mode::Setup(2); app.status = "What should I call you?".into(); }),
-        2 => text(&mut app.name_input, k, || { let id = PROVIDERS[app.provider].id; app.config.provider = id.into(); app.config.api_key = app.api_input.trim().into(); app.config.user_name = (!app.name_input.trim().is_empty()).then(|| app.name_input.trim().into()); app.config.model = None; if let Err(e) = app.save() { app.error = Some(e); app.status = "Config save failed".into(); return; } app.error = None; app.greeting = greeting(app.config.user_name.as_deref()); app.mode = Mode::Chat; app.status = "Loading models...".into(); refresh_async(app, tx.clone()); }),
+        2 => match k.code {
+            KeyCode::Enter => {
+                let id = PROVIDERS[app.provider].id;
+                app.config.provider = id.into();
+                app.config.api_key = app.api_input.trim().into();
+                app.config.user_name = (!app.name_input.trim().is_empty()).then(|| app.name_input.trim().into());
+                app.config.model = None;
+                if let Err(e) = app.save() { app.error = Some(e); app.status = "Config save failed".into(); return false; }
+                app.error = None;
+                app.greeting = greeting(app.config.user_name.as_deref());
+                app.mode = Mode::Chat;
+                app.status = "Loading models...".into();
+                refresh_async(app, tx.clone());
+            }
+            KeyCode::Backspace => { app.name_input.pop(); }
+            KeyCode::Char(c) => app.name_input.push(c),
+            _ => {}
+        },
         3 => if matches!(k.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')) { return true; },
         _ => {}
     }
@@ -182,7 +199,7 @@ async fn request(c:&Config,hist:&[Msg],tx:mpsc::Sender<EventMsg>,id:u64)->Result
 async fn openai(c:&Config,hist:&[Msg],tx:mpsc::Sender<EventMsg>,id:u64)->Result<(),String>{let b=base(c).ok_or("Provider endpoint unavailable")?;let model=c.model.as_deref().ok_or("No model selected")?;let h=http().await?;let msgs:Vec<Value>=hist.iter().map(|m|json!({"role":m.role,"content":m.content})).collect();let r=h.post(format!("{b}/chat/completions")).bearer_auth(&c.api_key).json(&json!({"model":model,"messages":msgs,"stream":true})).send().await.map_err(|e|e.to_string())?;let s=r.status();if !s.is_success(){let v=r.json::<Value>().await.unwrap_or_default();return Err(api_error(&v,s));}sse(r.bytes_stream(),tx,"/choices/0/delta/content",id).await}
 async fn anthropic(c:&Config,hist:&[Msg],tx:mpsc::Sender<EventMsg>,id:u64)->Result<(),String>{let model=c.model.as_deref().ok_or("No model selected")?;let h=http().await?;let msgs:Vec<Value>=hist.iter().filter(|m|m.role!="system").map(|m|json!({"role":m.role,"content":m.content})).collect();let r=h.post("https://api.anthropic.com/v1/messages").header("x-api-key",&c.api_key).header("anthropic-version","2023-06-01").json(&json!({"model":model,"max_tokens":4096,"messages":msgs,"stream":true})).send().await.map_err(|e|e.to_string())?;let s=r.status();if !s.is_success(){let v=r.json::<Value>().await.unwrap_or_default();return Err(api_error(&v,s));}sse(r.bytes_stream(),tx,"/delta/text",id).await}
 async fn google(c:&Config,hist:&[Msg],tx:mpsc::Sender<EventMsg>,id:u64)->Result<(),String>{let model=c.model.as_deref().ok_or("No model selected")?;let h=http().await?;let contents:Vec<Value>=hist.iter().map(|m|json!({"role":if m.role=="assistant"{"model"}else{"user"},"parts":[{"text":m.content}]})).collect();let r=h.post(format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={}",c.api_key)).json(&json!({"contents":contents})).send().await.map_err(|e|e.to_string())?;let s=r.status();let v:Value=r.json().await.map_err(|e|e.to_string())?;if !s.is_success(){return Err(api_error(&v,s));}if let Some(x)=v.pointer("/candidates/0/content/parts/0/text").and_then(Value::as_str){let _=tx.send(EventMsg::Chunk(id,x.into()));}let _=tx.send(EventMsg::Done(id));Ok(())}
-async fn sse<S>(mut stream:S,tx:mpsc::Sender<EventMsg>,path:&str,id:u64)->Result<(),String> where S:Stream<Item=Result<bytes::Bytes,reqwest::Error>>+Unpin {let mut buf=String::new();while let Some(x)=stream.next().await{buf.push_str(&String::from_utf8_lossy(&x.map_err(|e|e.to_string())?));while let Some(p)=buf.find("\n\n"){let block=buf[..p].to_owned();buf.drain(..p+2);for line in block.lines(){let d=line.strip_prefix("data: ").unwrap_or("");if d=="[DONE]"{let _=tx.send(EventMsg::Done(id));return Ok(());}if let Ok(v)=serde_json::from_str::<Value>(d){if let Some(s)=v.pointer(path).and_then(Value::as_str){let _=tx.send(EventMsg::Chunk(id,s.into()));}}}}}let _=tx.send(EventMsg::Done(id));Ok(())}
+async fn sse<S>(mut stream:S,tx:mpsc::Sender<EventMsg>,path:&str,id:u64)->Result<(),String> where S:Stream<Item=Result<bytes::Bytes,reqwest::Error>>+Unpin{let mut buf=String::new();while let Some(x)=stream.next().await{buf.push_str(&String::from_utf8_lossy(&x.map_err(|e|e.to_string())?));while let Some(p)=buf.find("\n\n"){let block=buf[..p].to_owned();buf.drain(..p+2);for line in block.lines(){let d=line.strip_prefix("data: ").unwrap_or("");if d=="[DONE]"{let _=tx.send(EventMsg::Done(id));return Ok(());}if let Ok(v)=serde_json::from_str::<Value>(d){if let Some(s)=v.pointer(path).and_then(Value::as_str){let _=tx.send(EventMsg::Chunk(id,s.into()));}}}}}let _=tx.send(EventMsg::Done(id));Ok(())}
 fn api_error(v:&Value,s:StatusCode)->String{v.pointer("/error/message").and_then(Value::as_str).or_else(||v.get("message").and_then(Value::as_str)).map(|x|format!("API error ({s}): {x}")).unwrap_or_else(||format!("API error: {s}"))}
 
 fn draw(f:&mut Frame,a:&App){let l=Layout::vertical([Constraint::Length(2),Constraint::Min(4),Constraint::Length(3),Constraint::Length(1)]).split(f.area());let head=if matches!(a.mode,Mode::Chat){format!("Term Code  •  {}  •  {}",PROVIDERS[a.provider].name,a.config.model.as_deref().unwrap_or("auto"))}else{"Term Code".into()};f.render_widget(Paragraph::new(head).alignment(Alignment::Center).bold(),l[0]);match a.mode{Mode::Chat=>chat(f,a,l[1]),Mode::Setup(step)=>setup(f,a,l[1],step),Mode::Models=>list(f,&a.models,&a.model_state,l[1],"Models"),Mode::Providers=>{let v=PROVIDERS.iter().map(|p|p.name.to_owned()).collect::<Vec<_>>();list(f,&v,&a.provider_state,l[1],"Providers")}}let input=match a.mode{Mode::Setup(1)=>format!("API key: {}","•".repeat(a.api_input.chars().count())),Mode::Setup(2)=>format!("Name: {}",a.name_input),Mode::Setup(3)=>"Config.json is invalid. Press Esc or Q to exit.".into(),_=>format!("> {}",a.input)};f.render_widget(Paragraph::new(input).block(Block::default().borders(Borders::ALL)),l[2]);f.render_widget(Paragraph::new(a.error.as_deref().unwrap_or(&a.status)),l[3]);}
