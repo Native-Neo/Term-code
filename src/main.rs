@@ -621,34 +621,44 @@ async fn list_models(c: &Config) -> Result<Vec<String>, String> {
                     .unwrap_or_default()
             }
             "google" => {
-                let r = h
-                    .get("https://generativelanguage.googleapis.com/v1beta/models")
-                    .header("x-goog-api-key", &c.api_key)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let s = r.status();
-                let v: Value = r.json().await.map_err(|e| e.to_string())?;
-                if !s.is_success() {
-                    return Err(api_error(&v, s));
-                }
-                v["models"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter(|x| {
-                                x["supportedGenerationMethods"].as_array().is_some_and(|m| {
-                                    m.iter().any(|v| v.as_str() == Some("generateContent"))
+                let mut models = Vec::new();
+                let mut page_token = None;
+                loop {
+                    let mut req = h
+                        .get("https://generativelanguage.googleapis.com/v1beta/models")
+                        .header("x-goog-api-key", &c.api_key)
+                        .query(&[("pageSize", "1000")]);
+                    if let Some(token) = &page_token {
+                        req = req.query(&[("pageToken", token)]);
+                    }
+                    let r = req.send().await.map_err(|e| e.to_string())?;
+                    let status = r.status();
+                    let v: Value = r.json().await.map_err(|e| e.to_string())?;
+                    if !status.is_success() {
+                        return Err(api_error(&v, status));
+                    }
+                    if let Some(items) = v["models"].as_array() {
+                        models.extend(
+                            items
+                                .iter()
+                                .filter(|x| {
+                                    x["supportedGenerationMethods"].as_array().is_some_and(|m| {
+                                        m.iter().any(|v| v.as_str() == Some("generateContent"))
+                                    })
                                 })
-                            })
-                            .filter_map(|x| {
-                                x["name"]
-                                    .as_str()
-                                    .map(|n| n.trim_start_matches("models/").to_owned())
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
+                                .filter_map(|x| {
+                                    x["name"]
+                                        .as_str()
+                                        .map(|n| n.trim_start_matches("models/").to_owned())
+                                }),
+                        );
+                    }
+                    page_token = v["nextPageToken"].as_str().map(str::to_owned);
+                    if page_token.is_none() {
+                        break;
+                    }
+                }
+                models
             }
             _ => return Err("Unsupported provider".into()),
         }
