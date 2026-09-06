@@ -833,7 +833,7 @@ fn draw(f: &mut Frame, a: &App) {
     } else {
         "Term Code".into()
     };
-    f.render_widget(Paragraph::new(head).alignment(Alignment::Center), l[0]);
+    f.render_widget(Paragraph::new(head), l[0]);
     match a.mode {
         Mode::Chat => chat(f, a, l[1]),
         Mode::Setup(step) => setup(f, a, l[1], step),
@@ -850,7 +850,7 @@ fn draw(f: &mut Frame, a: &App) {
         Mode::Setup(1) => format!("API key: {}", "•".repeat(a.api_input.chars().count())),
         Mode::Setup(2) => format!("Name: {}", a.name_input),
         Mode::Setup(3) => "Config.json is invalid. Press Esc or Q to exit.".into(),
-        _ => format!("> {}", a.input),
+        _ => format!("› {}", a.input),
     };
     f.render_widget(
         Paragraph::new(input).block(Block::default().borders(Borders::NONE)),
@@ -868,7 +868,11 @@ fn chat(f: &mut Frame, a: &App, r: Rect) {
         .map(|m| {
             format!(
                 "{}:\n{}\n",
-                if m.role == "user" { "You" } else { "Term Code" },
+                if m.role == "user" {
+                    "› You"
+                } else {
+                    "• Term Code"
+                },
                 m.content
             )
         })
@@ -909,7 +913,11 @@ fn setup(f: &mut Frame, a: &App, r: Rect, step: u8) {
         _ => String::new(),
     };
     f.render_widget(
-        Paragraph::new(text).block(Block::default().borders(Borders::NONE).title(title)),
+        Paragraph::new(text).block(
+            Block::default()
+                .borders(Borders::NONE)
+                .title(Span::styled(title, Style::default().cyan().bold())),
+        ),
         r,
     );
 }
@@ -921,8 +929,12 @@ fn list(f: &mut Frame, v: &[String], st: &ListState, r: Rect, title: &str) {
                 .map(|x| ListItem::new(x.clone()))
                 .collect::<Vec<_>>(),
         )
-        .highlight_symbol("> ")
-        .block(Block::default().borders(Borders::NONE).title(title)),
+        .highlight_symbol("› ")
+        .block(
+            Block::default()
+                .borders(Borders::NONE)
+                .title(Span::styled(title, Style::default().cyan().bold())),
+        ),
         r,
         &mut s,
     );
