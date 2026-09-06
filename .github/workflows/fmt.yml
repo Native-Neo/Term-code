@@ -13,7 +13,7 @@ jobs:
         with:
           components: rustfmt
       - run: |
-          python3 -c 'from pathlib import Path; import base64; p=Path("src/main.rs"); s=p.read_text(); p.write_text(s+"" if False else s.replace("Block::default().borders(Borders::ALL", "Block::default().borders(Borders::NONE").replace(".highlight_symbol(\"> ")", ".highlight_symbol(\"› \")").replace("Block::default().borders(Borders::NONE).title(title)", "Block::default().borders(Borders::NONE).title(Span::styled(title, Style::default().cyan().bold()))"))'
+          python3 -c 'from pathlib import Path; p=Path("src/main.rs"); s=p.read_text(); s=s.replace("Block::default().borders(Borders::ALL)", "Block::default().borders(Borders::NONE)"); s=s.replace(".highlight_symbol(\"> ")", ".highlight_symbol(\"› \")"); s=s.replace("Block::default().borders(Borders::NONE).title(title)", "Block::default().borders(Borders::NONE).title(Span::styled(title, Style::default().cyan().bold()))"); p.write_text(s)'
           cargo fmt
       - run: |
           git config user.name "github-actions[bot]"
