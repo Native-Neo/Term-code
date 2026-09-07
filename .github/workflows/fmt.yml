@@ -79,7 +79,9 @@ jobs:
           s = s.replace('KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}},','KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let end=a.input_cursor;let start=if ctrl{word_left(&a.input,end)}else{end-1};let mut c=chars(&a.input);c.drain(start..end);a.input=c.into_iter().collect();a.input_cursor=start}},')
           s = s.replace('KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}},','KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let end=if ctrl{word_right(&a.input,a.input_cursor)}else{a.input_cursor+1};let mut c=chars(&a.input);c.drain(a.input_cursor..end);a.input=c.into_iter().collect()}},')
           marker = 'let select=k.modifiers.contains(KeyModifiers::SHIFT);let ctrl=k.modifiers.contains(KeyModifiers::CONTROL);'
-          s = s.replace(marker, marker + 'if k.code==KeyCode::Char(\'a\')&&ctrl{a.input_anchor=Some(0);a.input_cursor=a.input.chars().count();return false}')
+          addition = marker + 'if k.code==KeyCode::Char(\'a\')&&ctrl{a.input_anchor=Some(0);a.input_cursor=a.input.chars().count();return false}'
+          if addition not in s:
+              s = s.replace(marker, addition)
           main.write_text(s)
 
           ui = Path("src/ui.rs")
@@ -91,7 +93,8 @@ jobs:
           else:
               ui.write_text(u)
           PY
-      - run: rustfmt src/main.rs src/ui.rs
+      - run: rustfmt src/main.rs
+      - run: rustfmt src/ui.rs
       - run: cargo check
       - name: Commit main only
         if: github.event_name == 'push'
@@ -109,7 +112,7 @@ jobs:
           if ! git diff --quiet -- src/ui.rs; then
             git add src/ui.rs
             git config user.name "github-actions[bot]"
-            git config user.email "41898282+users.noreply.github.com"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git commit -m "Fix chat auto-scroll"
             git push
           fi
