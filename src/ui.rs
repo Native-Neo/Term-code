@@ -307,18 +307,25 @@ fn draw_chat(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
                     ),
                     Span::styled(format!(" [{}]", m), Style::default().fg(t.text_dim)),
                 ]));
-                let content = if crate::tools::parse_tool_call(&msg.content).is_some() {
-                    let mut s = msg.content.clone();
-                    if let Some(start) = s.find("```json").or_else(|| s.find("```")) {
-                        if let Some(end) = s[start + 3..].find("```") {
-                            s.replace_range(start..start + 3 + end + 3, "")
+                if crate::tools::parse_tool_call(&msg.content).is_some() {
+                    let mut content = msg.content.clone();
+                    if let Some(start) = content.find("```json").or_else(|| content.find("```")) {
+                        if let Some(end) = content[start + 3..].find("```") {
+                            content.replace_range(start..start + 3 + end + 3, "")
                         }
                     }
-                    s
+                    l.extend(
+                        parse_markdown_to_lines(&content, false, t)
+                            .into_iter()
+                            .map(|line| line.clone()),
+                    )
                 } else {
-                    msg.content.clone()
-                };
-                l.extend(parse_markdown_to_lines(&content, false, t))
+                    l.extend(
+                        parse_markdown_to_lines(&msg.content, false, t)
+                            .into_iter()
+                            .map(|line| line.clone()),
+                    )
+                }
             }
         }
         let width = parts.0.width.saturating_sub(2).max(1) as usize;
