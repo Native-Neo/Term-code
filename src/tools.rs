@@ -62,50 +62,92 @@ GUIDELINES:
 }
 
 pub fn parse_tool_call(content: &str) -> Option<ToolCall> {
-    if !content.contains("```json") && !content.contains("```") && !content.contains("\"tool\"") {
+    if !content.contains("\"tool\"") {
         return None;
     }
 
-    // Try parsing from markdown json block
-    if let Some(start) = content.find("```json") {
-        let after = &content[start + 7..];
-        if let Some(end) = after.find("```") {
-            let json_str = after[..end].trim();
-            if let Ok(tc) = serde_json::from_str::<ToolCall>(json_str) {
-                return Some(tc);
-            }
-        }
-    }
-
-    // Try parsing generic code block
-    if let Some(start) = content.find("```") {
-        let after = &content[start + 3..];
-        // skip language tag if any
-        let code_body = if let Some(newline) = after.find('\n') {
-            &after[newline + 1..]
-        } else {
-            after
+    // Try every markdown json block in order.
+    let mut rest = content;
+    while let Some(start) = rest.find("```json") {
+        let after = &rest[start + 7..];
+        let (json_str, tail) = match after.find("```") {
+            Some(end) => (&after[..end], &after[end + 3..]),
+            None => break,
         };
-        if let Some(end) = code_body.find("```") {
-            let json_str = code_body[..end].trim();
-            if let Ok(tc) = serde_json::from_str::<ToolCall>(json_str) {
-                return Some(tc);
-            }
+        if let Ok(tc) = serde_json::from_str::<ToolCall>(json_str.trim()) {
+            return Some(tc);
         }
+        rest = tail;
     }
 
-    // Try raw json object containing "tool"
-    if let Some(start) = content.find('{') {
-        if let Some(end) = content.rfind('}') {
-            if end > start {
-                let json_str = &content[start..=end];
-                if let Ok(tc) = serde_json::from_str::<ToolCall>(json_str) {
+    // Try every generic code block, skipping the language tag.
+    rest = content;
+    while let Some(start) = rest.find("```") {
+        let after = &rest[start + 3..];
+        let (code_body, tail) = match after.find("```") {
+            Some(end) => {
+                let body = match after[..end].find('\n') {
+                    Some(nl) => &after[nl + 1..end],
+                    None => &after[..end],
+                };
+                (body, &after[end + 3..])
+            }
+            None => break,
+        };
+        if let Ok(tc) = serde_json::from_str::<ToolCall>(code_body.trim()) {
+            return Some(tc);
+        }
+        rest = tail;
+    }
+
+    // Finally, scan each raw JSON object one at a time. This handles
+    // multiple objects in one message without concatenating them, and
+    // skips braces that appear inside JSON string values.
+    let mut i = 0;
+    while let Some(rel) = content[i..].find('{') {
+        let start = i + rel;
+        match closing_brace(content, start) {
+            Some(end) => {
+                if let Ok(tc) = serde_json::from_str::<ToolCall>(&content[start..=end]) {
                     return Some(tc);
                 }
+                i = end + 1;
             }
+            None => break,
         }
     }
 
+    None
+}
+
+fn closing_brace(content: &str, open: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, &b) in bytes.iter().enumerate().skip(open) {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     None
 }
 
@@ -256,6 +298,9 @@ fn search_dir_recursive(
             search_dir_recursive(root, &path, query, matches, depth + 1);
         } else if path.is_file() {
             if let Ok(content) = fs::read_to_string(&path) {
+                if content.contains('\0') {
+                    continue;
+                }
                 let rel = path
                     .strip_prefix(root)
                     .unwrap_or(&path)
@@ -328,6 +373,28 @@ mod tests {
         let tc = parse_tool_call(content).expect("Tool call should be parsed");
         assert_eq!(tc.tool, "list_dir");
         assert_eq!(tc.args["path"], ".");
+    }
+
+    #[test]
+    fn test_parse_tool_call_multiple_blocks() {
+        let content = r#"Found it. First inspect the tree:
+```json
+{ "tool": "list_dir", "args": { "path": "." } }
+```
+No wait, we need the manifest:
+```json
+{ "tool": "read_file", "args": { "path": "Cargo.toml" } }
+```"#;
+        let tc = parse_tool_call(content).expect("first tool call should be parsed");
+        assert_eq!(tc.tool, "list_dir");
+    }
+
+    #[test]
+    fn test_parse_tool_call_string_braces() {
+        let content = "Write it: {\"tool\":\"write_file\",\"args\":{\"path\":\"a.txt\",\"content\":\"{hello} world\"}} and done.";
+        let tc = parse_tool_call(content).expect("should parse with braces inside a string");
+        assert_eq!(tc.tool, "write_file");
+        assert_eq!(tc.args["content"], "{hello} world");
     }
 
     #[test]
