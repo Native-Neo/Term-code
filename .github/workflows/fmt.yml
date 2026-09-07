@@ -1,24 +1,16 @@
 name: Format
+
 on:
   push:
+  pull_request:
+
 jobs:
-  redesign:
+  format:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Redesign chat view
-        run: python3 -c "import base64,re,pathlib; p=pathlib.Path('src/main.rs'); s=p.read_text(); x=base64.b64decode('Zm4gY2hhdChmOiAmbXV0IEZyYW1lLCBhOiAmQXBwLCByOiBSZWN0KSB7CiAgICBpZiBhLm1lc3NhZ2VzLmlzX2VtcHR5KCkgewogICAgICAgIGxldCBhcmVhID0gY2VudGVyZWRfcmVjdChyLCAzNiwgNCk7CiAgICAgICAgbGV0IHRleHQgPSBUZXh0Ojpmcm9tKHZlYyFbCiAgICAgICAgICAgIExpbmU6OmZyb20oU3Bhbjo6c3R5bGVkKCJUZXJtIENvZGUiLCBTdHlsZTo6ZGVmYXVsdCgpLm1hZ2VudGEoKS5ib2xkKCkpKSwKICAgICAgICAgICAgTGluZTo6ZnJvbShhLmdyZWV0aW5nLmFzX3N0cigpKSwKICAgICAgICBdKTsKICAgICAgICBmLnJlbmRlcl93aWRnZXQoUGFyYWdyYXBoOjpuZXcodGV4dCkuYWxpZ25tZW50KEFsaWdubWVudDo6Q2VudGVyKSwgYXJlYSk7CiAgICAgICAgcmV0dXJuOwogICAgfQogICAgbGV0IG11dCBsaW5lcyA9IFZlYzo6bmV3KCk7CiAgICBmb3IgbSBpbiAmYS5tZXNzYWdlcyB7CiAgICAgICAgbGV0IChsYWJlbCwgc3R5bGUpID0gaWYgbS5yb2xlID09ICJ1c2VyIiB7CiAgICAgICAgICAgICgi4oC6IFlvdSIsIFN0eWxlOjpkZWZhdWx0KCkuY3lhbigpLmJvbGQoKSkKICAgICAgICB9IGVsc2UgewogICAgICAgICAgICAoIuKAoiBUZXJtIENvZGUiLCBTdHlsZTo6ZGVmYXVsdCgpLm1hZ2VudGEoKS5ib2xkKCkpCiAgICAgICAgfTsKICAgICAgICBsaW5lcy5wdXNoKExpbmU6OmZyb20oU3Bhbjo6c3R5bGVkKGxhYmVsLCBzdHlsZSkpKTsKICAgICAgICBmb3IgbGluZSBpbiBtLmNvbnRlbnQubGluZXMoKSB7CiAgICAgICAgICAgIGxpbmVzLnB1c2goTGluZTo6ZnJvbShmb3JtYXQhKCIgIHtsaW5lfSIpKSk7CiAgICAgICAgfQogICAgICAgIGxpbmVzLnB1c2goTGluZTo6ZnJvbSgiIikpOwogICAgfQogICAgZi5yZW5kZXJfd2lkZ2V0KFBhcmFncmFwaDo6bmV3KFRleHQ6OmZyb20obGluZXMpKS5zY3JvbGwoKGEuc2Nyb2xsLCAwKSkud3JhcChXcmFwIHsgdHJpbTogZmFsc2UgfSksIHIpOwp9Cg==').decode(); s=re.sub(r'fn chat\\(.*?(?=fn setup\\()',x+'\\n',s,flags=re.S); p.write_text(s)"
       - run: cargo fmt --check
       - run: cargo check
-      - name: Commit source change
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main.rs
-          git commit -m "Redesign chat view"
-          git push
