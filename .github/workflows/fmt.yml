@@ -15,14 +15,96 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Fix response streaming
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+          p = Path("src/main.rs")
+          s = p.read_text()
+          s = s.replace('sse(r.bytes_stream(),tx,"/candidates/0/content/parts/0/text",id).await', 'sse(r.bytes_stream(),tx,"",id).await')
+          start = s.index("async fn sse<")
+          end = s.index("\nfn api_error", start)
+          fn = r'''async fn sse<S>(mut stream: S, tx: mpsc::Sender<EventMsg>, path: &str, id: u64) -> Result<(), String>
+          where
+              S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+          {
+              let mut buf = String::new();
+              let mut received = false;
+              while let Some(chunk) = stream.next().await {
+                  buf.push_str(&String::from_utf8_lossy(&chunk.map_err(|e| e.to_string())?));
+                  buf = buf.replace("\r\n", "\n");
+                  while let Some(end) = buf.find("\n\n") {
+                      let block = buf[..end].to_owned();
+                      buf.drain(..end + 2);
+                      for line in block.lines() {
+                          let data = line.strip_prefix("data:").map(str::trim).unwrap_or("");
+                          if data.is_empty() { continue; }
+                          if data == "[DONE]" {
+                              let _ = tx.send(EventMsg::Done(id));
+                              return Ok(());
+                          }
+                          let Ok(v) = serde_json::from_str::<Value>(data) else { continue; };
+                          if v.pointer("/error/message").is_some() {
+                              return Err(api_error(&v, StatusCode::BAD_GATEWAY));
+                          }
+                          if path.is_empty() {
+                              if let Some(parts) = v.pointer("/candidates/0/content/parts").and_then(Value::as_array) {
+                                  for part in parts {
+                                      if part.get("thought").and_then(Value::as_bool).unwrap_or(false) { continue; }
+                                      if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                          received = true;
+                                          let _ = tx.send(EventMsg::Chunk(id, text.to_owned()));
+                                      }
+                                  }
+                              }
+                          } else if let Some(text) = v.pointer(path).and_then(Value::as_str) {
+                              received = true;
+                              let _ = tx.send(EventMsg::Chunk(id, text.to_owned()));
+                          }
+                      }
+                  }
+              }
+              if !buf.trim().is_empty() {
+                  for line in buf.lines() {
+                      let data = line.strip_prefix("data:").map(str::trim).unwrap_or("");
+                      if data.is_empty() || data == "[DONE]" { continue; }
+                      let Ok(v) = serde_json::from_str::<Value>(data) else { continue; };
+                      if v.pointer("/error/message").is_some() {
+                          return Err(api_error(&v, StatusCode::BAD_GATEWAY));
+                      }
+                      if path.is_empty() {
+                          if let Some(parts) = v.pointer("/candidates/0/content/parts").and_then(Value::as_array) {
+                              for part in parts {
+                                  if part.get("thought").and_then(Value::as_bool).unwrap_or(false) { continue; }
+                                  if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                      received = true;
+                                      let _ = tx.send(EventMsg::Chunk(id, text.to_owned()));
+                                  }
+                              }
+                          }
+                      } else if let Some(text) = v.pointer(path).and_then(Value::as_str) {
+                          received = true;
+                          let _ = tx.send(EventMsg::Chunk(id, text.to_owned()));
+                      }
+                  }
+              }
+              if !received { return Err("Model stream ended without a response".into()); }
+              let _ = tx.send(EventMsg::Done(id));
+              Ok(())
+          }
+          '''
+          s = s[:start] + fn + s[end:]
+          p.write_text(s)
+          PY
       - run: rustfmt src/main.rs
       - run: cargo check
-      - name: Commit formatting
+      - name: Commit source
         if: github.event_name == 'push'
         run: |
           if git diff --quiet -- src/main.rs; then exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/main.rs
-          git commit -m "Format main.rs"
+          git commit -m "Fix streaming responses"
           git push
