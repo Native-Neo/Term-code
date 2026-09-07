@@ -504,6 +504,24 @@ fn key(a: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
             a.input_cursor = 0;
             clear_selection(a)
         }
+        KeyCode::Backspace if ctrl => {
+            if !delete_selection(a) {
+                let p = word_left(&a.input, a.input_cursor);
+                let old = a.input_cursor;
+                move_cursor(a, p, false);
+                a.input_anchor = Some(p);
+                a.input_cursor = old;
+                let _ = delete_selection(a);
+            }
+        }
+        KeyCode::Delete if ctrl => {
+            if !delete_selection(a) {
+                let p = word_right(&a.input, a.input_cursor);
+                a.input_anchor = Some(a.input_cursor);
+                a.input_cursor = p;
+                let _ = delete_selection(a);
+            }
+        }
         KeyCode::Backspace => {
             if !delete_selection(a) && a.input_cursor > 0 {
                 let mut c = chars(&a.input);
@@ -512,7 +530,7 @@ fn key(a: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
                 a.input_cursor -= 1
             }
         }
-        KeyCode::Delete if !ctrl => {
+        KeyCode::Delete => {
             if !delete_selection(a) && a.input_cursor < a.input.chars().count() {
                 let mut c = chars(&a.input);
                 c.remove(a.input_cursor);
@@ -544,24 +562,6 @@ fn key(a: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
         KeyCode::PageUp => a.scroll = a.scroll.saturating_add(10),
         KeyCode::PageDown => a.scroll = a.scroll.saturating_sub(10),
         KeyCode::Char('a') if ctrl => move_cursor(a, a.input.chars().count(), true),
-        KeyCode::Backspace if ctrl => {
-            if !delete_selection(a) {
-                let p = word_left(&a.input, a.input_cursor);
-                let old = a.input_cursor;
-                move_cursor(a, p, false);
-                a.input_anchor = Some(p);
-                a.input_cursor = old;
-                let _ = delete_selection(a);
-            }
-        }
-        KeyCode::Delete if ctrl => {
-            if !delete_selection(a) {
-                let p = word_right(&a.input, a.input_cursor);
-                a.input_anchor = Some(a.input_cursor);
-                a.input_cursor = p;
-                let _ = delete_selection(a);
-            }
-        }
         KeyCode::Char(c) if !ctrl => {
             delete_selection(a);
             let p = byte_pos(&a.input, a.input_cursor);
