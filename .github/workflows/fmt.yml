@@ -23,7 +23,7 @@ jobs:
           s = main.read_text()
           start = s.index("fn loop_app<")
           end = s.index("\nfn tab_complete", start)
-          s = s[:start] + r'''fn loop_app<B: Backend>(term: &mut Terminal<B>, app: &mut App, tx: mpsc::Sender<EventMsg>, rx: mpsc::Receiver<EventMsg>) -> io::Result<()> {
+          loop = r'''fn loop_app<B: Backend>(term: &mut Terminal<B>, app: &mut App, tx: mpsc::Sender<EventMsg>, rx: mpsc::Receiver<EventMsg>) -> io::Result<()> {
               loop {
                   while let Ok(e) = rx.try_recv() {
                       match e {
@@ -68,11 +68,12 @@ jobs:
               }
               Ok(())
           }
-          ''' + s[end:]
+          '''
+          s = s[:start] + loop + s[end:]
           s = s.replace('sse(r.bytes_stream(),tx,"/candidates/0/content/parts/0/text",id).await', 'sse(r.bytes_stream(),tx,"",id).await')
           start = s.index("async fn sse<")
           end = s.index("\nfn api_error", start)
-          s = s[:start] + r'''async fn sse<S>(mut stream: S, tx: mpsc::Sender<EventMsg>, path: &str, id: u64) -> Result<(), String>
+          sse = r'''async fn sse<S>(mut stream: S, tx: mpsc::Sender<EventMsg>, path: &str, id: u64) -> Result<(), String>
           where
               S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
           {
@@ -121,9 +122,14 @@ jobs:
               let _ = tx.send(EventMsg::Done(id));
               Ok(())
           }
-          ''' + s[end:]
-          s = s.replace('KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}},','KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let end=a.input_cursor;let start=if ctrl{word_left(&a.input,end)}else{end-1};let mut c=chars(&a.input);c.drain(start..end);a.input=c.into_iter().collect();a.input_cursor=start}},')
-          s = s.replace('KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}},','KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let end=if ctrl{word_right(&a.input,a.input_cursor)}else{a.input_cursor+1};let mut c=chars(&a.input);c.drain(a.input_cursor..end);a.input=c.into_iter().collect()}},')
+          '''
+          s = s[:start] + sse + s[end:]
+          old_back = 'KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}},'
+          new_back = 'KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let end=a.input_cursor;let start=if ctrl{word_left(&a.input,end)}else{end-1};let mut c=chars(&a.input);c.drain(start..end);a.input=c.into_iter().collect();a.input_cursor=start}},'
+          s = s.replace(old_back, new_back)
+          old_del = 'KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}},'
+          new_del = 'KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let end=if ctrl{word_right(&a.input,a.input_cursor)}else{a.input_cursor+1};let mut c=chars(&a.input);c.drain(a.input_cursor..end);a.input=c.into_iter().collect()}},'
+          s = s.replace(old_del, new_del)
           marker='let select=k.modifiers.contains(KeyModifiers::SHIFT);let ctrl=k.modifiers.contains(KeyModifiers::CONTROL);'
           addition=marker+'if k.code==KeyCode::Char(\'a\')&&ctrl{a.input_anchor=Some(0);a.input_cursor=a.input.chars().count();return false}'
           if addition not in s: s=s.replace(marker,addition)
@@ -137,14 +143,14 @@ jobs:
           else: ui.write_text(u)
           PY
       - name: Format main
-        run: rustfmt src/main.rs 2>/tmp/rustfmt-main.log
+        run: rustfmt --edition 2024 src/main.rs 2>/tmp/rustfmt-main.log
       - name: Upload main format error
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: rustfmt-main-error
           path: /tmp/rustfmt-main.log
-      - run: rustfmt src/ui.rs
+      - run: rustfmt --edition 2024 src/ui.rs
       - run: cargo check
       - name: Commit main only
         if: github.event_name == 'push'
