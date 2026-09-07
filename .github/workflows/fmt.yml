@@ -4,9 +4,6 @@ on:
   push:
   pull_request:
 
-permissions:
-  contents: write
-
 jobs:
   format:
     runs-on: ubuntu-latest
@@ -15,30 +12,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Fix TUI source
-        run: |
-          python3 <<'PY'
-          from pathlib import Path
-          main=Path("src/main.rs")
-          s=main.read_text()
-          start=s.index("fn loop_app<"); end=s.index("\nfn tab_complete",start)
-          s=s[:start]+r'''fn loop_app<B: Backend>(term:&mut Terminal<B>,app:&mut App,tx:mpsc::Sender<EventMsg>,rx:mpsc::Receiver<EventMsg>)->io::Result<()>{loop{while let Ok(e)=rx.try_recv(){match e{EventMsg::Chunk(id,text)if id==app.request_id=>{if let Some(m)=app.messages.last_mut(){m.content.push_str(&text);app.scroll=0}},EventMsg::Done(id)if id==app.request_id=>{app.busy=false;app.status="Ready".into();let tool=app.messages.last().cloned().and_then(|m|if m.role=="assistant"{tools::parse_tool_call(&m.content)}else{None});if let Some(tc)=tool{app.tool_calls.push(tc.clone());if tc.tool=="spawn_subagent"{let task=tc.args["task"].as_str().unwrap_or("subtask").to_string();app.busy=true;app.status=format!("Subagent running: {task}");tools::spawn_subagent_task(app.config.clone(),task,app.cwd.clone(),tx.clone(),app.request_id)}else{app.status=format!("Executing tool {}...",tc.tool);let result=match tools::execute_tool(&app.cwd,&tc){Ok(o)=>format!("[TOOL RESULT] ({})\n{o}",tc.tool),Err(e)=>format!("[TOOL ERROR] ({})\n{e}",tc.tool)};app.messages.push(Msg{role:"system".into(),content:result});send_followup(app,&tx)}}}},EventMsg::Error(id,e)if id==app.request_id=>{app.busy=false;app.error=Some(e);app.status="Error".into();if app.messages.last().is_some_and(|m|m.role=="assistant"&&m.content.trim().is_empty()){app.messages.pop()}},EventMsg::Models(id,models)if id==app.request_id=>{app.models=models;app.model_state.select((!app.models.is_empty()).then_some(0));app.busy=false;app.status="Ready".into();choose_model(app)},_=>{}}}term.draw(|f|ui::draw(f,app))?;if event::poll(Duration::from_millis(40))?{match event::read()?{Event::Key(k)=>{if key(app,k,&tx){break}},Event::Mouse(m)if m.kind==MouseEventKind::Down(MouseButton::Left)&&m.row==app.tool_click_y.get()=>{app.tools_expanded=!app.tools_expanded},_=>{}}}}Ok(())}fn tab_complete'''+s[end+len("\nfn tab_complete"):]
-          s=s.replace('sse(r.bytes_stream(),tx,"/candidates/0/content/parts/0/text",id).await','sse(r.bytes_stream(),tx,"",id).await')
-          start=s.index("async fn sse<"); end=s.index("\nfn api_error",start)
-          s=s[:start]+r'''async fn sse<S>(mut stream:S,tx:mpsc::Sender<EventMsg>,path:&str,id:u64)->Result<(),String>where S:Stream<Item=Result<bytes::Bytes,reqwest::Error>>+Unpin{let mut buf=String::new();let mut received=false;while let Some(chunk)=stream.next().await{buf.push_str(&String::from_utf8_lossy(&chunk.map_err(|e|e.to_string())?));buf=buf.replace("\r\n","\n");while let Some(end)=buf.find("\n\n"){let block=buf[..end].to_owned();buf.drain(..end+2);for line in block.lines(){let data=line.strip_prefix("data:").map(str::trim).unwrap_or("");if data.is_empty(){continue}if data=="[DONE]"{let _=tx.send(EventMsg::Done(id));return Ok(())}let Ok(v)=serde_json::from_str::<Value>(data)else{continue};if v.pointer("/error/message").is_some(){return Err(api_error(&v,StatusCode::BAD_GATEWAY))}if path.is_empty(){if let Some(parts)=v.pointer("/candidates/0/content/parts").and_then(Value::as_array){for part in parts{if part.get("thought").and_then(Value::as_bool).unwrap_or(false){continue}if let Some(text)=part.get("text").and_then(Value::as_str){received=true;let _=tx.send(EventMsg::Chunk(id,text.to_owned()))}}}}else if let Some(text)=v.pointer(path).and_then(Value::as_str){received=true;let _=tx.send(EventMsg::Chunk(id,text.to_owned()))}}}}if !received{return Err("Model stream ended without a response".into())}let _=tx.send(EventMsg::Done(id));Ok(())}
-fn api_error'''+s[end+len("\nfn api_error"):]
-          s=s.replace('tokio::spawn(async move','let _=tokio::spawn(async move').replace('std::thread::spawn(move||','let _=std::thread::spawn(move||').replace('a.config.model=Some(m);let _=a.save()}}','a.config.model=Some(m);let _=a.save();}}')
-          marker='let select=k.modifiers.contains(KeyModifiers::SHIFT);let ctrl=k.modifiers.contains(KeyModifiers::CONTROL);';addition=marker+'if k.code==KeyCode::Char(\'a\')&&ctrl{a.input_anchor=Some(0);a.input_cursor=a.input.chars().count();return false}';
-          if addition not in s:s=s.replace(marker,addition)
-          main.write_text(s)
-          PY
-      - name: Format main
-        continue-on-error: true
-        run: rustfmt --edition 2024 src/main.rs 2>/tmp/rustfmt-main.log
-      - name: Upload format log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustfmt-main-error
-          path: /tmp/rustfmt-main.log
+      - run: cargo fmt --check
       - run: cargo check
