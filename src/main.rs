@@ -108,6 +108,7 @@ pub struct App {
     pub greeting: String,
     pub scroll: u16,
     pub request_id: u64,
+    pub subagent_ids: Vec<u64>,
     pub cwd: PathBuf,
     pub tool_calls: Vec<tools::ToolCall>,
     pub tools_expanded: bool,
@@ -154,6 +155,7 @@ impl App {
             greeting: greeting(name.as_deref()),
             scroll: 0,
             request_id: 0,
+            subagent_ids: Vec::new(),
             cwd,
             tool_calls: Vec::new(),
             tools_expanded: false,
@@ -288,57 +290,71 @@ fn loop_app<B: Backend>(
     loop {
         while let Ok(e) = rx.try_recv() {
             match e {
-                EventMsg::Chunk(id, s) if id == app.request_id => {
+                EventMsg::Chunk(id, s) if id == app.request_id || app.subagent_ids.contains(&id) => {
                     if let Some(m) = app.messages.last_mut() {
                         m.content.push_str(&s);
                         app.scroll = 0;
                     }
                 }
-                EventMsg::Done(id) if id == app.request_id => {
+                EventMsg::Done(id) if id == app.request_id || app.subagent_ids.contains(&id) => {
                     app.busy = false;
                     app.status = "Ready".into();
-                    if let Some(last) = app.messages.last().cloned() {
-                        if last.role == "assistant" {
-                            if let Some(tc) = tools::parse_tool_call(&last.content) {
-                                app.tool_calls.push(tc.clone());
-                                if tc.tool == "spawn_subagent" {
-                                    let task =
-                                        tc.args["task"].as_str().unwrap_or("subtask").to_string();
-                                    app.busy = true;
-                                    app.status = format!("Subagent running: {task}");
-                                    tools::spawn_subagent_task(
-                                        app.config.clone(),
-                                        task,
-                                        app.cwd.clone(),
-                                        tx.clone(),
-                                        app.request_id,
-                                    );
-                                } else {
-                                    app.status = format!("Executing tool {}...", tc.tool);
-                                    let result = match tools::execute_tool(&app.cwd, &tc) {
-                                        Ok(o) => format!("[TOOL RESULT] ({})\n{o}", tc.tool),
-                                        Err(e) => format!("[TOOL ERROR] ({})\n{e}", tc.tool),
-                                    };
-                                    app.messages.push(Msg {
-                                        role: "system".into(),
-                                        content: result,
-                                    });
-                                    send_followup(app, &tx);
+                    let is_subagent = take_subagent_id(app, id);
+                    if !is_subagent {
+                        if let Some(last) = app.messages.last().cloned() {
+                            if last.role == "assistant" {
+                                if let Some(tc) = tools::parse_tool_call(&last.content) {
+                                    app.tool_calls.push(tc.clone());
+                                    if tc.tool == "spawn_subagent" {
+                                        let task = tc.args["task"]
+                                            .as_str()
+                                            .unwrap_or("subtask")
+                                            .to_string();
+                                        app.request_id = app.request_id.wrapping_add(1);
+                                        let subagent_id = app.request_id;
+                                        app.subagent_ids.push(subagent_id);
+                                        app.busy = true;
+                                        app.status = format!("Subagent running: {task}");
+                                        tools::spawn_subagent_task(
+                                            app.config.clone(),
+                                            task,
+                                            app.cwd.clone(),
+                                            tx.clone(),
+                                            subagent_id,
+                                        );
+                                    } else {
+                                        app.status = format!("Executing tool {}...", tc.tool);
+                                        let result = match tools::execute_tool(&app.cwd, &tc) {
+                                            Ok(o) => format!("[TOOL RESULT] ({})\n{o}", tc.tool),
+                                            Err(e) => format!("[TOOL ERROR] ({})\n{e}", tc.tool),
+                                        };
+                                        app.messages.push(Msg {
+                                            role: "system".into(),
+                                            content: result,
+                                        });
+                                        send_followup(app, &tx);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                EventMsg::Error(id, e) if id == app.request_id => {
+                EventMsg::Error(id, e) if id == app.request_id || app.subagent_ids.contains(&id) => {
                     app.busy = false;
-                    app.error = Some(e);
-                    app.status = "Error".into();
-                    if app
-                        .messages
-                        .last()
-                        .is_some_and(|m| m.role == "assistant" && m.content.trim().is_empty())
-                    {
-                        app.messages.pop();
+                    let is_subagent = take_subagent_id(app, id);
+                    if is_subagent {
+                        app.status = "Subagent failed".into();
+                        if let Some(m) = app.messages.last_mut() {
+                            m.content.push_str(&format!("\n[SUBAGENT ERROR] {e}"));
+                        }
+                    } else {
+                        app.error = Some(e);
+                        app.status = "Error".into();
+                        if app.messages.last().is_some_and(
+                            |m| m.role == "assistant" && m.content.trim().is_empty(),
+                        ) {
+                            app.messages.pop();
+                        }
                     }
                 }
                 EventMsg::Models(id, v) if id == app.request_id => {
@@ -372,6 +388,14 @@ fn loop_app<B: Backend>(
         }
     }
     Ok(())
+}
+fn take_subagent_id(a: &mut App, id: u64) -> bool {
+    if let Some(i) = a.subagent_ids.iter().position(|x| *x == id) {
+        a.subagent_ids.remove(i);
+        true
+    } else {
+        false
+    }
 }
 fn tab_complete(input: &mut String) {
     if !input.starts_with('/') {
@@ -561,7 +585,7 @@ fn key(a: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
         KeyCode::Down if a.input.is_empty() => a.scroll = a.scroll.saturating_sub(1),
         KeyCode::PageUp => a.scroll = a.scroll.saturating_add(10),
         KeyCode::PageDown => a.scroll = a.scroll.saturating_sub(10),
-        KeyCode::Char('a') if ctrl => move_cursor(a, a.input.chars().count(), true),
+        KeyCode::Char('a') if ctrl => move_cursor(a, 0, true),
         KeyCode::Char(c) if !ctrl => {
             delete_selection(a);
             let p = byte_pos(&a.input, a.input_cursor);
@@ -876,10 +900,10 @@ async fn list_models(c: &Config) -> Result<Vec<String>, String> {
                     .await
                     .map_err(|e| e.to_string())?;
                 let s = r.status();
-                let v: Value = r.json().await.map_err(|e| e.to_string())?;
                 if !s.is_success() {
-                    return Err(api_error(&v, s));
+                    return Err(error_from(r, s).await);
                 }
+                let v: Value = r.json().await.map_err(|e| e.to_string())?;
                 v["data"]
                     .as_array()
                     .map(|a| {
@@ -902,10 +926,10 @@ async fn list_models(c: &Config) -> Result<Vec<String>, String> {
                     }
                     let r = req.send().await.map_err(|e| e.to_string())?;
                     let status = r.status();
-                    let v: Value = r.json().await.map_err(|e| e.to_string())?;
                     if !status.is_success() {
-                        return Err(api_error(&v, status));
+                        return Err(error_from(r, status).await);
                     }
+                    let v: Value = r.json().await.map_err(|e| e.to_string())?;
                     if let Some(items) = v["models"].as_array() {
                         models.extend(
                             items
@@ -974,7 +998,7 @@ async fn openai(
         .map_err(|e| e.to_string())?;
     let s = r.status();
     if !s.is_success() {
-        return Err(api_error(&r.json::<Value>().await.unwrap_or_default(), s));
+        return Err(error_from(r, s).await);
     }
     sse(r.bytes_stream(), tx, "/choices/0/delta/content", id).await
 }
@@ -989,8 +1013,9 @@ async fn anthropic(
     let sys = tools::system_prompt(cwd);
     let msgs = hist
         .iter()
-        .filter(|m| m.role != "system")
-        .map(|m| json!({"role":m.role,"content":m.content}))
+        .map(|m| {
+            json!({"role": if m.role == "system" { "user" } else { &m.role }, "content": m.content})
+        })
         .collect::<Vec<_>>();
     let h = http().await?;
     let r = h
@@ -1003,7 +1028,7 @@ async fn anthropic(
         .map_err(|e| e.to_string())?;
     let s = r.status();
     if !s.is_success() {
-        return Err(api_error(&r.json::<Value>().await.unwrap_or_default(), s));
+        return Err(error_from(r, s).await);
     }
     sse(r.bytes_stream(), tx, "/delta/text", id).await
 }
@@ -1030,7 +1055,7 @@ async fn google(
         .map_err(|e| e.to_string())?;
     let s = r.status();
     if !s.is_success() {
-        return Err(api_error(&r.json::<Value>().await.unwrap_or_default(), s));
+        return Err(error_from(r, s).await);
     }
     sse(r.bytes_stream(), tx, "", id).await
 }
@@ -1118,6 +1143,23 @@ fn api_error(v: &Value, s: StatusCode) -> String {
         .or_else(|| v.get("message").and_then(Value::as_str))
         .map(|x| format!("API error ({s}): {x}"))
         .unwrap_or_else(|| format!("API error: {s}"))
+}
+async fn error_from(r: reqwest::Response, s: StatusCode) -> String {
+    match r.bytes().await {
+        Ok(body) => match serde_json::from_slice::<Value>(&body) {
+            Ok(v) if !v.is_null() => api_error(&v, s),
+            _ => {
+                let text = String::from_utf8_lossy(&body);
+                let text = text.trim();
+                if text.is_empty() {
+                    format!("API error ({s})")
+                } else {
+                    format!("API error ({s}): {text}")
+                }
+            }
+        },
+        Err(_) => format!("API error ({s})"),
+    }
 }
 #[cfg(test)]
 mod tests {
