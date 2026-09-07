@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   format:
     runs-on: ubuntu-latest
@@ -12,6 +15,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-        
+      - name: Normalize remaining Rust files
+        run: |
+          cargo fmt --all
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/theme.rs
+          if ! git diff --cached --quiet; then git commit -m 'Format theme source'; git fetch origin main; git rebase origin/main; git push origin HEAD:main; fi
+          git add src/tools.rs
+          if ! git diff --cached --quiet; then git commit -m 'Format tool source'; git fetch origin main; git rebase origin/main; git push origin HEAD:main; fi
       - run: cargo fmt --check
       - run: cargo check
