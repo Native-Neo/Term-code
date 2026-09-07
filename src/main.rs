@@ -590,7 +590,7 @@ fn setup_key(a: &mut App, k: KeyEvent, s: u8, tx: &mpsc::Sender<EventMsg>) -> bo
                 a.status = "What should I call you?".into()
             }
             KeyCode::Esc => a.mode = Mode::Setup(0),
-            KeyCode::Backspace => {
+            KeyCode::Backspace if !ctrl => {
                 a.api_input.pop();
             }
             KeyCode::Char(c) => a.api_input.push(c),
