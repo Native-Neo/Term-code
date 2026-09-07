@@ -22,6 +22,7 @@ jobs:
 
           main = Path("src/main.rs")
           s = main.read_text()
+          s = s.replace('send_followup(app,&tx)}}}}}},EventMsg::Error', 'send_followup(app,&tx)}}}}},EventMsg::Error')
           s = s.replace('sse(r.bytes_stream(),tx,"/candidates/0/content/parts/0/text",id).await', 'sse(r.bytes_stream(),tx,"",id).await')
           start = s.index("async fn sse<")
           end = s.index("\nfn api_error", start)
@@ -76,8 +77,12 @@ jobs:
           }
           '''
           s = s[:start] + sse + s[end:]
-          s = s.replace('KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}},','KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let end=a.input_cursor;let start=if ctrl{word_left(&a.input,end)}else{end-1};let mut c=chars(&a.input);c.drain(start..end);a.input=c.into_iter().collect();a.input_cursor=start}},')
-          s = s.replace('KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}},','KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let end=if ctrl{word_right(&a.input,a.input_cursor)}else{a.input_cursor+1};let mut c=chars(&a.input);c.drain(a.input_cursor..end);a.input=c.into_iter().collect()}},')
+          old_back = 'KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}},'
+          new_back = 'KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let end=a.input_cursor;let start=if ctrl{word_left(&a.input,end)}else{end-1};let mut c=chars(&a.input);c.drain(start..end);a.input=c.into_iter().collect();a.input_cursor=start}},'
+          s = s.replace(old_back, new_back)
+          old_del = 'KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}},'
+          new_del = 'KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let end=if ctrl{word_right(&a.input,a.input_cursor)}else{a.input_cursor+1};let mut c=chars(&a.input);c.drain(a.input_cursor..end);a.input=c.into_iter().collect()}},'
+          s = s.replace(old_del, new_del)
           marker = 'let select=k.modifiers.contains(KeyModifiers::SHIFT);let ctrl=k.modifiers.contains(KeyModifiers::CONTROL);'
           addition = marker + 'if k.code==KeyCode::Char(\'a\')&&ctrl{a.input_anchor=Some(0);a.input_cursor=a.input.chars().count();return false}'
           if addition not in s:
