@@ -504,7 +504,7 @@ fn key(a: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
             a.input_cursor = 0;
             clear_selection(a)
         }
-        KeyCode::Backspace if !ctrl => {
+        KeyCode::Backspace => {
             if !delete_selection(a) && a.input_cursor > 0 {
                 let mut c = chars(&a.input);
                 c.remove(a.input_cursor - 1);
@@ -590,7 +590,7 @@ fn setup_key(a: &mut App, k: KeyEvent, s: u8, tx: &mpsc::Sender<EventMsg>) -> bo
                 a.status = "What should I call you?".into()
             }
             KeyCode::Esc => a.mode = Mode::Setup(0),
-            KeyCode::Backspace if !ctrl => {
+            KeyCode::Backspace => {
                 a.api_input.pop();
             }
             KeyCode::Char(c) => a.api_input.push(c),
