@@ -17,22 +17,12 @@ jobs:
           components: rustfmt
       - name: Fix source files
         run: |
-          python3 -c 'from pathlib import Path;p=Path("src/ui.rs");s=p.read_text();start=s.index("                let content = if crate::tools::parse_tool_call");end=s.index("                l.extend(parse_markdown_to_lines(&content, false, t))",start)+len("                l.extend(parse_markdown_to_lines(&content, false, t))");new="""                if crate::tools::parse_tool_call(&msg.content).is_some() {
-                    let mut content = msg.content.clone();
-                    if let Some(start) = content.find("```json").or_else(|| content.find("```")) {
-                        if let Some(end) = content[start + 3..].find("```") {
-                            content.replace_range(start..start + 3 + end + 3, "")
-                        }
-                    }
-                    l.extend(parse_markdown_to_lines(&content, false, t).into_iter().map(|line| line.clone()))
-                } else {
-                    l.extend(parse_markdown_to_lines(&msg.content, false, t).into_iter().map(|line| line.clone()))
-                }""";p.write_text(s[:start]+new+s[end:])'
+          python3 -c 'from pathlib import Path;p=Path("src/ui.rs");s=p.read_text();s=s.replace("parse_markdown_to_lines(&content, false, t)","parse_markdown_to_lines(Box::leak(content.into_boxed_str()), false, t)",1);p.write_text(s)'
           cargo fmt --all
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add src/ui.rs
-          if ! git diff --cached --quiet; then git commit -m 'Fix TUI rendering and auto-scroll'; git pull --rebase origin main; git push; fi
+          if ! git diff --cached --quiet; then git commit -m 'Fix TUI response rendering'; git pull --rebase origin main; git push; fi
           python3 -c 'from pathlib import Path;p=Path("src/main.rs");s=p.read_text();s=s.replace("        KeyCode::Backspace => {","        KeyCode::Backspace if !ctrl => {",1);s=s.replace("        KeyCode::Delete => {","        KeyCode::Delete if !ctrl => {",1);p.write_text(s)'
           cargo fmt --all
           git add src/main.rs
