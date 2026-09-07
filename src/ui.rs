@@ -315,7 +315,7 @@ fn draw_chat(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
                         }
                     }
                     l.extend(
-                        parse_markdown_to_lines(&content, false, t)
+                        parse_markdown_to_lines(Box::leak(content.into_boxed_str()), false, t)
                             .into_iter()
                             .map(|line| line.clone()),
                     )
