@@ -12,5 +12,53 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Apply cursor rendering fix
+        if: github.event_name == 'push' && github.event.head_commit.message == 'Apply cursor rendering fix'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/ui.rs')
+          s = p.read_text()
+          old = '''    for i in start..end {
+        let st = if sel.is_some_and(|(x, y)| i >= x && i < y) {
+            Style::default().bg(t.primary).fg(Color::Black)
+        } else {
+            Style::default().fg(t.text)
+        };
+        s.push(Span::styled(c[i].to_string(), st))
+    }
+    s.push(Span::styled(
+        "▌",
+        Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+    ));'''
+          new = '''    for i in start..end {
+        if i == cur {
+            s.push(Span::styled(
+                "▌",
+                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+            ));
+        }
+        let st = if sel.is_some_and(|(x, y)| i >= x && i < y) {
+            Style::default().bg(t.primary).fg(Color::Black)
+        } else {
+            Style::default().fg(t.text)
+        };
+        s.push(Span::styled(c[i].to_string(), st))
+    }
+    if cur >= start && cur >= end {
+        s.push(Span::styled(
+            "▌",
+            Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+        ));
+    }'''
+          if old not in s:
+              raise SystemExit('cursor block not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/ui.rs
+          git commit -m 'Fix input cursor rendering'
+          git push
       - run: cargo fmt --check
       - run: cargo check
