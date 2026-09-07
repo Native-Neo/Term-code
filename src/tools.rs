@@ -1,3 +1,4 @@
+use crate::{Config, EventMsg, Msg};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -6,7 +7,6 @@ use std::{
     process::Command,
     sync::mpsc,
 };
-use crate::{Config, EventMsg, Msg};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -114,7 +114,8 @@ pub fn execute_tool(cwd: &Path, tc: &ToolCall) -> Result<String, String> {
         "list_dir" => {
             let rel_path = tc.args["path"].as_str().unwrap_or(".");
             let target = resolve_path(cwd, rel_path);
-            let entries = fs::read_dir(&target).map_err(|e| format!("Failed to read dir {rel_path}: {e}"))?;
+            let entries =
+                fs::read_dir(&target).map_err(|e| format!("Failed to read dir {rel_path}: {e}"))?;
 
             let mut files = Vec::new();
             for entry in entries.flatten() {
@@ -135,26 +136,36 @@ pub fn execute_tool(cwd: &Path, tc: &ToolCall) -> Result<String, String> {
             let target = resolve_path(cwd, rel_path);
             let content = fs::read_to_string(&target)
                 .map_err(|e| format!("Failed to read file {rel_path}: {e}"))?;
-            
+
             let lines: Vec<String> = content
                 .lines()
                 .enumerate()
                 .map(|(idx, l)| format!("{:4} | {l}", idx + 1))
                 .collect();
 
-            Ok(format!("File `{rel_path}` ({} lines):\n{}", lines.len(), lines.join("\n")))
+            Ok(format!(
+                "File `{rel_path}` ({} lines):\n{}",
+                lines.len(),
+                lines.join("\n")
+            ))
         }
         "write_file" => {
             let rel_path = tc.args["path"].as_str().ok_or("Missing 'path' argument")?;
-            let content = tc.args["content"].as_str().ok_or("Missing 'content' argument")?;
+            let content = tc.args["content"]
+                .as_str()
+                .ok_or("Missing 'content' argument")?;
             let target = resolve_path(cwd, rel_path);
 
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
 
-            fs::write(&target, content).map_err(|e| format!("Failed to write file {rel_path}: {e}"))?;
-            Ok(format!("Successfully wrote {} bytes to `{rel_path}`", content.len()))
+            fs::write(&target, content)
+                .map_err(|e| format!("Failed to write file {rel_path}: {e}"))?;
+            Ok(format!(
+                "Successfully wrote {} bytes to `{rel_path}`",
+                content.len()
+            ))
         }
         "run_cmd" => {
             let cmd_str = tc.args["cmd"].as_str().ok_or("Missing 'cmd' argument")?;
@@ -169,7 +180,8 @@ pub fn execute_tool(cwd: &Path, tc: &ToolCall) -> Result<String, String> {
                     .arg(cmd_str)
                     .current_dir(cwd)
                     .output()
-            }.map_err(|e| format!("Failed to run command '{cmd_str}': {e}"))?;
+            }
+            .map_err(|e| format!("Failed to run command '{cmd_str}': {e}"))?;
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -180,7 +192,9 @@ pub fn execute_tool(cwd: &Path, tc: &ToolCall) -> Result<String, String> {
             ))
         }
         "search" => {
-            let query = tc.args["query"].as_str().ok_or("Missing 'query' argument")?;
+            let query = tc.args["query"]
+                .as_str()
+                .ok_or("Missing 'query' argument")?;
             let mut matches = Vec::new();
 
             search_dir_recursive(cwd, cwd, query, &mut matches, 0);
@@ -192,7 +206,10 @@ pub fn execute_tool(cwd: &Path, tc: &ToolCall) -> Result<String, String> {
                     matches.truncate(50);
                     matches.push("... (results truncated to 50 matches)".to_string());
                 }
-                Ok(format!("Search results for '{query}':\n{}", matches.join("\n")))
+                Ok(format!(
+                    "Search results for '{query}':\n{}",
+                    matches.join("\n")
+                ))
             }
         }
         "spawn_subagent" => {
@@ -212,7 +229,13 @@ fn resolve_path(cwd: &Path, rel: &str) -> PathBuf {
     }
 }
 
-fn search_dir_recursive(root: &Path, current: &Path, query: &str, matches: &mut Vec<String>, depth: usize) {
+fn search_dir_recursive(
+    root: &Path,
+    current: &Path,
+    query: &str,
+    matches: &mut Vec<String>,
+    depth: usize,
+) {
     if depth > 8 || matches.len() >= 50 {
         return;
     }
@@ -233,7 +256,11 @@ fn search_dir_recursive(root: &Path, current: &Path, query: &str, matches: &mut 
             search_dir_recursive(root, &path, query, matches, depth + 1);
         } else if path.is_file() {
             if let Ok(content) = fs::read_to_string(&path) {
-                let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
                 for (line_num, line) in content.lines().enumerate() {
                     if line.contains(query) {
                         matches.push(format!("{rel}:{} | {}", line_num + 1, line.trim()));
@@ -260,17 +287,20 @@ pub fn spawn_subagent_task(
             format!("\n[SUBAGENT] Started subagent task: \"{task_prompt}\"\n"),
         ));
 
-        let sub_messages = vec![
-            Msg {
-                role: "user".to_string(),
-                content: format!("Execute this subtask in `{}`: {}", cwd.display(), task_prompt),
-            },
-        ];
+        let sub_messages = vec![Msg {
+            role: "user".to_string(),
+            content: format!(
+                "Execute this subtask in `{}`: {}",
+                cwd.display(),
+                task_prompt
+            ),
+        }];
 
         // Execute subagent prompt via HTTP request
         match crate::request_direct(&config, &sub_messages, &cwd).await {
             Ok(result) => {
-                let summary = format!("\n[SUBAGENT RESULT] Completed task \"{task_prompt}\":\n{result}\n");
+                let summary =
+                    format!("\n[SUBAGENT RESULT] Completed task \"{task_prompt}\":\n{result}\n");
                 let _ = tx.send(EventMsg::Chunk(request_id, summary));
                 let _ = tx.send(EventMsg::Done(request_id));
             }
