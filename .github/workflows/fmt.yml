@@ -21,7 +21,7 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add src/theme.rs
-          git stash push -u -- .
+          git stash push -u -- src/tools.rs
           if ! git diff --cached --quiet; then git commit -m 'Format theme source'; git fetch origin main; git rebase origin/main; git push origin HEAD:main; fi
           git stash pop || true
           git add src/tools.rs
