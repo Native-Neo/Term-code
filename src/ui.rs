@@ -711,18 +711,20 @@ fn draw_input(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
         "> ",
         Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
     )];
-    for i in start..end {
-        let st = if sel.is_some_and(|(x, y)| i >= x && i < y) {
-            Style::default().bg(t.primary).fg(Color::Black)
-        } else {
-            Style::default().fg(t.text)
-        };
-        s.push(Span::styled(c[i].to_string(), st))
+    let cursor_style = Style::default().fg(t.primary).add_modifier(Modifier::BOLD);
+    for i in start..=end {
+        if i == cur {
+            s.push(Span::styled("▌", cursor_style));
+        }
+        if i < end {
+            let st = if sel.is_some_and(|(x, y)| i >= x && i < y) {
+                Style::default().bg(t.primary).fg(Color::Black)
+            } else {
+                Style::default().fg(t.text)
+            };
+            s.push(Span::styled(c[i].to_string(), st));
+        }
     }
-    s.push(Span::styled(
-        "▌",
-        Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
-    ));
     f.render_widget(Paragraph::new(Line::from(s)).block(b), r)
 }
 fn draw_footer(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
