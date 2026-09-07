@@ -32,10 +32,10 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add src/ui.rs
-          if ! git diff --cached --quiet; then git commit -m 'Fix TUI rendering and auto-scroll'; git push; fi
+          if ! git diff --cached --quiet; then git commit -m 'Fix TUI rendering and auto-scroll'; git pull --rebase origin main; git push; fi
           python3 -c 'from pathlib import Path;p=Path("src/main.rs");s=p.read_text();s=s.replace("        KeyCode::Backspace => {","        KeyCode::Backspace if !ctrl => {",1);s=s.replace("        KeyCode::Delete => {","        KeyCode::Delete if !ctrl => {",1);p.write_text(s)'
           cargo fmt --all
           git add src/main.rs
-          if ! git diff --cached --quiet; then git commit -m 'Fix prompt editing controls'; git push; fi
+          if ! git diff --cached --quiet; then git commit -m 'Fix prompt editing controls'; git pull --rebase origin main; git push; fi
       - run: cargo fmt --check
       - run: cargo check
