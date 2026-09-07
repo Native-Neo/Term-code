@@ -22,7 +22,77 @@ jobs:
 
           main = Path("src/main.rs")
           s = main.read_text()
-          s = s.replace('send_followup(app,&tx)}}}}}},EventMsg::Error', 'send_followup(app,&tx)}}}}},EventMsg::Error')
+          start = s.index("fn loop_app<")
+          end = s.index("\nfn tab_complete", start)
+          loop = r'''fn loop_app<B: Backend>(term: &mut Terminal<B>, app: &mut App, tx: mpsc::Sender<EventMsg>, rx: mpsc::Receiver<EventMsg>) -> io::Result<()> {
+              loop {
+                  while let Ok(e) = rx.try_recv() {
+                      match e {
+                          EventMsg::Chunk(id, text) if id == app.request_id => {
+                              if let Some(m) = app.messages.last_mut() {
+                                  m.content.push_str(&text);
+                                  app.scroll = 0;
+                              }
+                          }
+                          EventMsg::Done(id) if id == app.request_id => {
+                              app.busy = false;
+                              app.status = "Ready".into();
+                              let tool = app.messages.last().cloned().and_then(|m| {
+                                  if m.role == "assistant" { tools::parse_tool_call(&m.content) } else { None }
+                              });
+                              if let Some(tc) = tool {
+                                  app.tool_calls.push(tc.clone());
+                                  if tc.tool == "spawn_subagent" {
+                                      let task = tc.args["task"].as_str().unwrap_or("subtask").to_string();
+                                      app.busy = true;
+                                      app.status = format!("Subagent running: {task}");
+                                      tools::spawn_subagent_task(app.config.clone(), task, app.cwd.clone(), tx.clone(), app.request_id);
+                                  } else {
+                                      app.status = format!("Executing tool {}...", tc.tool);
+                                      let result = match tools::execute_tool(&app.cwd, &tc) {
+                                          Ok(o) => format!("[TOOL RESULT] ({})\n{o}", tc.tool),
+                                          Err(e) => format!("[TOOL ERROR] ({})\n{e}", tc.tool),
+                                      };
+                                      app.messages.push(Msg { role: "system".into(), content: result });
+                                      send_followup(app, &tx);
+                                  }
+                              }
+                          }
+                          EventMsg::Error(id, e) if id == app.request_id => {
+                              app.busy = false;
+                              app.error = Some(e);
+                              app.status = "Error".into();
+                              if app.messages.last().is_some_and(|m| m.role == "assistant" && m.content.trim().is_empty()) {
+                                  app.messages.pop();
+                              }
+                          }
+                          EventMsg::Models(id, models) if id == app.request_id => {
+                              app.models = models;
+                              app.model_state.select((!app.models.is_empty()).then_some(0));
+                              app.busy = false;
+                              app.status = "Ready".into();
+                              choose_model(app);
+                          }
+                          _ => {}
+                      }
+                  }
+                  term.draw(|f| ui::draw(f, app))?;
+                  if event::poll(Duration::from_millis(40))? {
+                      match event::read()? {
+                          Event::Key(k) => {
+                              if key(app, k, &tx) { break; }
+                          }
+                          Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) && m.row == app.tool_click_y.get() => {
+                              app.tools_expanded = !app.tools_expanded;
+                          }
+                          _ => {}
+                      }
+                  }
+              }
+              Ok(())
+          }
+          '''
+          s = s[:start] + loop + s[end:]
           s = s.replace('sse(r.bytes_stream(),tx,"/candidates/0/content/parts/0/text",id).await', 'sse(r.bytes_stream(),tx,"",id).await')
           start = s.index("async fn sse<")
           end = s.index("\nfn api_error", start)
