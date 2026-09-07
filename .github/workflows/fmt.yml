@@ -15,17 +15,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Fix response streaming
+      - name: Fix TUI source
         run: |
           python3 <<'PY'
           from pathlib import Path
           import re
-          p = Path("src/main.rs")
-          s = p.read_text()
+
+          main = Path("src/main.rs")
+          s = main.read_text()
           s = s.replace('sse(r.bytes_stream(),tx,"/candidates/0/content/parts/0/text",id).await', 'sse(r.bytes_stream(),tx,"",id).await')
           start = s.index("async fn sse<")
           end = s.index("\nfn api_error", start)
-          fn = r'''async fn sse<S>(mut stream: S, tx: mpsc::Sender<EventMsg>, path: &str, id: u64) -> Result<(), String>
+          sse = r'''async fn sse<S>(mut stream: S, tx: mpsc::Sender<EventMsg>, path: &str, id: u64) -> Result<(), String>
           where
               S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
           {
@@ -94,17 +95,35 @@ jobs:
               Ok(())
           }
           '''
-          s = s[:start] + fn + s[end:]
-          p.write_text(s)
+          s = s[:start] + sse + s[end:]
+
+          old = '''KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}},'''
+          new = '''KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let end=a.input_cursor;let start=if ctrl{word_left(&a.input,end)}else{end-1};let mut c=chars(&a.input);c.drain(start..end);a.input=c.into_iter().collect();a.input_cursor=start}},'''
+          s = s.replace(old, new)
+          old = '''KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}},'''
+          new = '''KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let end=if ctrl{word_right(&a.input,a.input_cursor)}else{a.input_cursor+1};let mut c=chars(&a.input);c.drain(a.input_cursor..end);a.input=c.into_iter().collect()}},'''
+          s = s.replace(old, new)
+          marker = 'let select=k.modifiers.contains(KeyModifiers::SHIFT);let ctrl=k.modifiers.contains(KeyModifiers::CONTROL);'
+          s = s.replace(marker, marker + 'if k.code==KeyCode::Char(\'a\')&&ctrl{a.input_anchor=Some(0);a.input_cursor=a.input.chars().count();return false}')
+          main.write_text(s)
+
+          ui = Path("src/ui.rs")
+          u = ui.read_text()
+          old = 'f.render_widget(Paragraph::new(l).block(block).scroll((a.scroll,0)).wrap(Wrap{trim:false}),parts.0)'
+          new = '''let width=parts.0.width.saturating_sub(2).max(1) as usize;let height=parts.0.height.saturating_sub(2) as usize;let visual_lines=l.iter().map(|line|((line.width().max(1)+width-1)/width).max(1)).sum::<usize>();let max_scroll=visual_lines.saturating_sub(height);let scroll=max_scroll.saturating_sub(a.scroll as usize).min(u16::MAX as usize) as u16;f.render_widget(Paragraph::new(l).block(block).scroll((scroll,0)).wrap(Wrap{trim:false}),parts.0)'''
+          if old not in u:
+              raise SystemExit("chat render pattern not found")
+          ui.write_text(u.replace(old,new))
           PY
-      - run: rustfmt src/main.rs
+      - run: rustfmt src/main.rs src/ui.rs
       - run: cargo check
       - name: Commit source
         if: github.event_name == 'push'
         run: |
-          if git diff --quiet -- src/main.rs; then exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main.rs
-          git commit -m "Fix streaming responses"
+          git add src/main.rs src/ui.rs
+          if git diff --cached --quiet; then exit 0; fi
+          git diff --cached --name-only | grep -qx 'src/main.rs\|src/ui.rs'
+          git commit -m "Fix TUI input and streaming"
           git push
