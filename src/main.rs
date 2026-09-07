@@ -1,3 +1,7 @@
+mod theme;
+mod tools;
+mod ui;
+
 use chrono::{Local, Timelike};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -7,14 +11,14 @@ use crossterm::{
 use futures_util::{Stream, StreamExt};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::ListState,
 };
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs, io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -23,20 +27,21 @@ const DIR: &str = ".nativestuff";
 const FILE: &str = "Config.json";
 
 #[derive(Clone, Serialize, Deserialize)]
-struct Config {
-    provider: String,
-    api_key: String,
+pub struct Config {
+    pub provider: String,
+    pub api_key: String,
     #[serde(default)]
-    model: Option<String>,
+    pub model: Option<String>,
     #[serde(default)]
-    user_name: Option<String>,
+    pub user_name: Option<String>,
 }
 
-struct Provider {
-    id: &'static str,
-    name: &'static str,
+pub struct Provider {
+    pub id: &'static str,
+    pub name: &'static str,
 }
-const PROVIDERS: &[Provider] = &[
+
+pub const PROVIDERS: &[Provider] = &[
     Provider {
         id: "openai",
         name: "OpenAI",
@@ -68,39 +73,44 @@ const PROVIDERS: &[Provider] = &[
 ];
 
 #[derive(Clone)]
-struct Msg {
-    role: String,
-    content: String,
+pub struct Msg {
+    pub role: String,
+    pub content: String,
 }
-enum EventMsg {
+
+pub enum EventMsg {
     Chunk(u64, String),
     Done(u64),
     Error(u64, String),
     Models(u64, Vec<String>),
 }
-enum Mode {
+
+#[derive(PartialEq, Eq)]
+pub enum Mode {
     Chat,
     Setup(u8),
     Models,
     Providers,
 }
-struct App {
-    config: Config,
-    messages: Vec<Msg>,
-    input: String,
-    status: String,
-    error: Option<String>,
-    busy: bool,
-    mode: Mode,
-    provider: usize,
-    models: Vec<String>,
-    model_state: ListState,
-    provider_state: ListState,
-    api_input: String,
-    name_input: String,
-    greeting: String,
-    scroll: u16,
-    request_id: u64,
+
+pub struct App {
+    pub config: Config,
+    pub messages: Vec<Msg>,
+    pub input: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub busy: bool,
+    pub mode: Mode,
+    pub provider: usize,
+    pub models: Vec<String>,
+    pub model_state: ListState,
+    pub provider_state: ListState,
+    pub api_input: String,
+    pub name_input: String,
+    pub greeting: String,
+    pub scroll: u16,
+    pub request_id: u64,
+    pub cwd: PathBuf,
 }
 
 impl App {
@@ -110,21 +120,26 @@ impl App {
             .position(|p| p.id == config.provider)
             .unwrap_or(0);
         let name = config.user_name.clone();
-        let mode = if setup {
+        let mode = if error.is_some() {
+            Mode::Setup(3)
+        } else if setup {
             Mode::Setup(0)
         } else {
-            Mode::Setup(3)
+            Mode::Chat
         };
+        let status = if error.is_some() {
+            "Fix Config.json and restart".into()
+        } else if setup {
+            "Choose a provider".into()
+        } else {
+            "Ready".into()
+        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
             config,
             messages: Vec::new(),
             input: String::new(),
-            status: if setup {
-                "Choose a provider"
-            } else {
-                "Fix Config.json and restart"
-            }
-            .into(),
+            status,
             error,
             busy: false,
             mode,
@@ -137,8 +152,10 @@ impl App {
             greeting: greeting(name.as_deref()),
             scroll: 0,
             request_id: 0,
+            cwd,
         }
     }
+
     fn save(&self) -> Result<(), String> {
         let dir = home().join(DIR);
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -163,6 +180,7 @@ fn home() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| ".".into())
 }
+
 fn load() -> Result<Option<Config>, String> {
     let p = home().join(DIR).join(FILE);
     if !p.exists() {
@@ -181,6 +199,7 @@ fn load() -> Result<Option<Config>, String> {
     }
     Ok(Some(c))
 }
+
 fn greeting(name: Option<&str>) -> String {
     let n = name.map(|x| format!(", {x}")).unwrap_or_default();
     let h = Local::now().hour();
@@ -274,6 +293,38 @@ fn loop_app<B: Backend>(
                 EventMsg::Done(id) if id == app.request_id => {
                     app.busy = false;
                     app.status = "Ready".into();
+
+                    // Check if assistant's response emitted a ToolCall
+                    if let Some(last_msg) = app.messages.last().cloned() {
+                        if last_msg.role == "assistant" {
+                            if let Some(tc) = tools::parse_tool_call(&last_msg.content) {
+                                if tc.tool == "spawn_subagent" {
+                                    let task_prompt = tc.args["task"].as_str().unwrap_or("subtask").to_string();
+                                    app.busy = true;
+                                    app.status = format!("Subagent running: {task_prompt}");
+                                    tools::spawn_subagent_task(
+                                        app.config.clone(),
+                                        task_prompt,
+                                        app.cwd.clone(),
+                                        tx.clone(),
+                                        app.request_id,
+                                    );
+                                } else {
+                                    app.status = format!("Executing tool {}...", tc.tool);
+                                    let res = tools::execute_tool(&app.cwd, &tc);
+                                    let result_str = match res {
+                                        Ok(output) => format!("[TOOL RESULT] ({})\n{output}", tc.tool),
+                                        Err(err) => format!("[TOOL ERROR] ({})\n{err}", tc.tool),
+                                    };
+                                    app.messages.push(Msg {
+                                        role: "system".into(),
+                                        content: result_str,
+                                    });
+                                    send_followup(app, &tx);
+                                }
+                            }
+                        }
+                    }
                 }
                 EventMsg::Error(id, e) if id == app.request_id => {
                     app.busy = false;
@@ -294,7 +345,7 @@ fn loop_app<B: Backend>(
                 _ => {}
             }
         }
-        term.draw(|f| draw(f, app))?;
+        term.draw(|f| ui::draw(f, app))?;
         if event::poll(Duration::from_millis(40))? {
             if let Event::Key(k) = event::read()?
                 && key(app, k, &tx)
@@ -306,7 +357,42 @@ fn loop_app<B: Backend>(
     Ok(())
 }
 
+fn tab_complete(input: &mut String) {
+    if !input.starts_with('/') {
+        return;
+    }
+    let commands = [
+        "/model",
+        "/provider",
+        "/config",
+        "/clear",
+        "/new",
+        "/quit",
+        "/exit",
+        "/help",
+    ];
+
+    let current = input.trim().to_lowercase();
+
+    if current == "/" {
+        *input = commands[0].to_string();
+        return;
+    }
+
+    if let Some(pos) = commands.iter().position(|c| *c == current) {
+        let next_idx = (pos + 1) % commands.len();
+        *input = commands[next_idx].to_string();
+        return;
+    }
+
+    let matches: Vec<&&str> = commands.iter().filter(|c| c.starts_with(&current)).collect();
+    if let Some(first) = matches.first() {
+        *input = first.to_string();
+    }
+}
+
 fn key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
+    // Ctrl+C ALWAYS stops/exits the program
     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
         return true;
     }
@@ -322,6 +408,15 @@ fn key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
         }
         Mode::Chat => {}
     }
+
+    // Tab completion for commands
+    if k.code == KeyCode::Tab || k.code == KeyCode::BackTab {
+        if app.input.starts_with('/') {
+            tab_complete(&mut app.input);
+        }
+        return false;
+    }
+
     if k.code == KeyCode::Enter {
         if app.input.starts_with('/') {
             return command(app, tx);
@@ -331,18 +426,27 @@ fn key(app: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
         }
         return false;
     }
+
     match k.code {
         KeyCode::Esc if app.busy => {
+            // Esc stops the model from responding
             app.request_id = app.request_id.wrapping_add(1);
             app.busy = false;
             app.status = "Cancelled".into();
         }
-        KeyCode::Esc => return true,
+        KeyCode::Esc => {
+            // Esc in chat mode clears input if present, but DOES NOT exit program
+            app.input.clear();
+        }
         KeyCode::Backspace => {
             app.input.pop();
         }
         KeyCode::Up if app.input.is_empty() => app.scroll = app.scroll.saturating_add(1),
         KeyCode::Down if app.input.is_empty() => app.scroll = app.scroll.saturating_sub(1),
+        KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10),
+        KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
+        KeyCode::Home => app.scroll = 1000,
+        KeyCode::End => app.scroll = 0,
         KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => app.input.push(c),
         _ => {}
     }
@@ -365,6 +469,9 @@ fn setup_key(app: &mut App, k: KeyEvent, step: u8, tx: &mpsc::Sender<EventMsg>) 
             KeyCode::Enter if !app.api_input.trim().is_empty() => {
                 app.mode = Mode::Setup(2);
                 app.status = "What should I call you?".into();
+            }
+            KeyCode::Esc => {
+                app.mode = Mode::Setup(0);
             }
             KeyCode::Backspace => {
                 app.api_input.pop();
@@ -390,6 +497,9 @@ fn setup_key(app: &mut App, k: KeyEvent, step: u8, tx: &mpsc::Sender<EventMsg>) 
                 app.mode = Mode::Chat;
                 app.status = "Loading models...".into();
                 refresh_async(app, tx.clone());
+            }
+            KeyCode::Esc => {
+                app.mode = Mode::Setup(1);
             }
             KeyCode::Backspace => {
                 app.name_input.pop();
@@ -428,7 +538,7 @@ fn command(app: &mut App, tx: &mpsc::Sender<EventMsg>) -> bool {
                 "Provider: {} | Model: {} | API key: configured",
                 PROVIDERS[app.provider].name,
                 app.config.model.as_deref().unwrap_or("auto")
-            )
+            );
         }
         "/new" | "/clear" => {
             app.messages.clear();
@@ -439,6 +549,7 @@ fn command(app: &mut App, tx: &mpsc::Sender<EventMsg>) -> bool {
     }
     false
 }
+
 fn model_key(app: &mut App, k: KeyEvent) {
     match k.code {
         KeyCode::Esc => app.mode = Mode::Chat,
@@ -449,6 +560,16 @@ fn model_key(app: &mut App, k: KeyEvent) {
             let i = app.model_state.selected().unwrap_or(0);
             if i + 1 < app.models.len() {
                 app.model_state.select(Some(i + 1));
+            }
+        }
+        KeyCode::PageUp => {
+            let i = app.model_state.selected().unwrap_or(0);
+            app.model_state.select(Some(i.saturating_sub(5)));
+        }
+        KeyCode::PageDown => {
+            let i = app.model_state.selected().unwrap_or(0);
+            if !app.models.is_empty() {
+                app.model_state.select(Some((i + 5).min(app.models.len() - 1)));
             }
         }
         KeyCode::Enter => {
@@ -466,6 +587,7 @@ fn model_key(app: &mut App, k: KeyEvent) {
         _ => {}
     }
 }
+
 fn provider_key(app: &mut App, k: KeyEvent) {
     match k.code {
         KeyCode::Esc => app.mode = Mode::Chat,
@@ -507,14 +629,55 @@ fn send(app: &mut App, tx: &mpsc::Sender<EventMsg>) {
     app.busy = true;
     app.status = "Thinking...".into();
     let cfg = app.config.clone();
+    let cwd = app.cwd.clone();
     let hist = app.messages.clone();
     let tx = tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = request(&cfg, &hist, tx.clone(), id).await {
+        if let Err(e) = request(&cfg, &cwd, &hist, tx.clone(), id).await {
             let _ = tx.send(EventMsg::Error(id, e));
         }
     });
 }
+
+fn send_followup(app: &mut App, tx: &mpsc::Sender<EventMsg>) {
+    app.error = None;
+    app.request_id = app.request_id.wrapping_add(1);
+    let id = app.request_id;
+    app.messages.push(Msg {
+        role: "assistant".into(),
+        content: String::new(),
+    });
+    app.busy = true;
+    app.status = "Processing tool result...".into();
+    let cfg = app.config.clone();
+    let cwd = app.cwd.clone();
+    let hist = app.messages.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = request(&cfg, &cwd, &hist, tx.clone(), id).await {
+            let _ = tx.send(EventMsg::Error(id, e));
+        }
+    });
+}
+
+pub async fn request_direct(
+    c: &Config,
+    hist: &[Msg],
+    cwd: &Path,
+) -> Result<String, String> {
+    let (tx, rx) = mpsc::channel();
+    let id = 99999;
+    request(c, cwd, hist, tx, id).await?;
+
+    let mut result = String::new();
+    while let Ok(msg) = rx.try_recv() {
+        if let EventMsg::Chunk(_, chunk) = msg {
+            result.push_str(&chunk);
+        }
+    }
+    Ok(result)
+}
+
 fn refresh_async(app: &mut App, tx: mpsc::Sender<EventMsg>) {
     app.request_id = app.request_id.wrapping_add(1);
     let id = app.request_id;
@@ -534,6 +697,7 @@ fn refresh_async(app: &mut App, tx: mpsc::Sender<EventMsg>) {
         });
     });
 }
+
 async fn load_models(app: &mut App) -> Result<(), String> {
     let v = list_models(&app.config).await?;
     app.models = v;
@@ -542,6 +706,7 @@ async fn load_models(app: &mut App) -> Result<(), String> {
     choose_model(app);
     Ok(())
 }
+
 fn choose_model(app: &mut App) {
     if app
         .config
@@ -564,6 +729,7 @@ async fn http() -> Result<Client, String> {
         .build()
         .map_err(|e| e.to_string())
 }
+
 fn base(c: &Config) -> Option<&'static str> {
     match c.provider.as_str() {
         "openai" => Some("https://api.openai.com/v1"),
@@ -574,6 +740,7 @@ fn base(c: &Config) -> Option<&'static str> {
         _ => None,
     }
 }
+
 async fn list_models(c: &Config) -> Result<Vec<String>, String> {
     let h = http().await?;
     let models = if let Some(b) = base(c) {
@@ -671,28 +838,32 @@ async fn list_models(c: &Config) -> Result<Vec<String>, String> {
 
 async fn request(
     c: &Config,
+    cwd: &Path,
     hist: &[Msg],
     tx: mpsc::Sender<EventMsg>,
     id: u64,
 ) -> Result<(), String> {
     match c.provider.as_str() {
-        "anthropic" => anthropic(c, hist, tx, id).await,
-        "google" => google(c, hist, tx, id).await,
-        _ => openai(c, hist, tx, id).await,
+        "anthropic" => anthropic(c, cwd, hist, tx, id).await,
+        "google" => google(c, cwd, hist, tx, id).await,
+        _ => openai(c, cwd, hist, tx, id).await,
     }
 }
+
 async fn openai(
     c: &Config,
+    cwd: &Path,
     hist: &[Msg],
     tx: mpsc::Sender<EventMsg>,
     id: u64,
 ) -> Result<(), String> {
     let b = base(c).ok_or("Provider endpoint unavailable")?;
     let model = c.model.as_deref().ok_or("No model selected")?;
-    let msgs: Vec<Value> = hist
-        .iter()
-        .map(|m| json!({"role":m.role,"content":m.content}))
-        .collect::<Vec<_>>();
+    let mut msgs: Vec<Value> = vec![json!({"role": "system", "content": tools::system_prompt(cwd)})];
+    for m in hist {
+        let role = if m.role == "system" { "user" } else { &m.role };
+        msgs.push(json!({"role": role, "content": m.content}));
+    }
     let h = http().await?;
     let r = h
         .post(format!("{b}/chat/completions"))
@@ -707,13 +878,16 @@ async fn openai(
     }
     sse(r.bytes_stream(), tx, "/choices/0/delta/content", id).await
 }
+
 async fn anthropic(
     c: &Config,
+    cwd: &Path,
     hist: &[Msg],
     tx: mpsc::Sender<EventMsg>,
     id: u64,
 ) -> Result<(), String> {
     let model = c.model.as_deref().ok_or("No model selected")?;
+    let sys = tools::system_prompt(cwd);
     let msgs: Vec<Value> = hist
         .iter()
         .filter(|m| m.role != "system")
@@ -724,7 +898,7 @@ async fn anthropic(
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", &c.api_key)
         .header("anthropic-version", "2023-06-01")
-        .json(&json!({"model":model,"max_tokens":4096,"messages":msgs,"stream":true}))
+        .json(&json!({"model":model,"max_tokens":4096,"system":sys,"messages":msgs,"stream":true}))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -734,14 +908,20 @@ async fn anthropic(
     }
     sse(r.bytes_stream(), tx, "/delta/text", id).await
 }
+
 async fn google(
     c: &Config,
+    cwd: &Path,
     hist: &[Msg],
     tx: mpsc::Sender<EventMsg>,
     id: u64,
 ) -> Result<(), String> {
     let model = c.model.as_deref().ok_or("No model selected")?;
-    let contents: Vec<Value> = hist.iter().map(|m| json!({"role":if m.role == "assistant" { "model" } else { "user" },"parts":[{"text":m.content}]})).collect::<Vec<_>>();
+    let sys = tools::system_prompt(cwd);
+    let contents: Vec<Value> = hist
+        .iter()
+        .map(|m| json!({"role":if m.role == "assistant" { "model" } else { "user" },"parts":[{"text":m.content}]}))
+        .collect::<Vec<_>>();
     let h = http().await?;
     let r = h
         .post(format!(
@@ -749,7 +929,7 @@ async fn google(
         ))
         .query(&[("alt", "sse")])
         .header("x-goog-api-key", &c.api_key)
-        .json(&json!({"contents":contents}))
+        .json(&json!({"contents":contents, "system_instruction": {"parts": [{"text": sys}]}}))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -765,6 +945,7 @@ async fn google(
     )
     .await
 }
+
 async fn sse<S>(
     mut stream: S,
     tx: mpsc::Sender<EventMsg>,
@@ -808,6 +989,7 @@ where
     let _ = tx.send(EventMsg::Done(id));
     Ok(())
 }
+
 fn api_error(v: &Value, s: StatusCode) -> String {
     v.pointer("/error/message")
         .and_then(Value::as_str)
@@ -816,115 +998,28 @@ fn api_error(v: &Value, s: StatusCode) -> String {
         .unwrap_or_else(|| format!("API error: {s}"))
 }
 
-fn draw(f: &mut Frame, a: &App) {
-    let l = Layout::vertical([
-        Constraint::Min(4),
-        Constraint::Length(3),
-        Constraint::Length(1),
-    ])
-    .split(f.area());
-    match a.mode {
-        Mode::Chat => chat(f, a, l[0]),
-        Mode::Setup(step) => setup(f, a, l[0], step),
-        Mode::Models => list(f, &a.models, &a.model_state, l[0], "Models"),
-        Mode::Providers => {
-            let v = PROVIDERS
-                .iter()
-                .map(|p| p.name.to_owned())
-                .collect::<Vec<_>>();
-            list(f, &v, &a.provider_state, l[0], "Providers");
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tab_completion() {
+        let mut input = "/m".to_string();
+        tab_complete(&mut input);
+        assert_eq!(input, "/model");
+
+        let mut input = "/p".to_string();
+        tab_complete(&mut input);
+        assert_eq!(input, "/provider");
+
+        let mut input = "/c".to_string();
+        tab_complete(&mut input);
+        assert_eq!(input, "/config");
+        tab_complete(&mut input);
+        assert_eq!(input, "/clear");
+
+        let mut input = "/".to_string();
+        tab_complete(&mut input);
+        assert_eq!(input, "/model");
     }
-    let input = match a.mode {
-        Mode::Setup(1) => format!("API key: {}", "•".repeat(a.api_input.chars().count())),
-        Mode::Setup(2) => format!("Name: {}", a.name_input),
-        Mode::Setup(3) => "Config.json is invalid. Press Esc or Q to exit.".into(),
-        _ => format!("› {}", a.input),
-    };
-    f.render_widget(
-        Paragraph::new(input).block(Block::default().borders(Borders::NONE)),
-        l[1],
-    );
-    f.render_widget(
-        Paragraph::new(a.error.as_deref().unwrap_or(&a.status)),
-        l[2],
-    );
-}
-fn chat(f: &mut Frame, a: &App, r: Rect) {
-    let mut s = a
-        .messages
-        .iter()
-        .map(|m| {
-            format!(
-                "{}:\n{}\n",
-                if m.role == "user" {
-                    "› You"
-                } else {
-                    "• Term Code"
-                },
-                m.content
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if s.is_empty() {
-        s = a.greeting.clone();
-    }
-    f.render_widget(
-        Paragraph::new(s)
-            .scroll((a.scroll, 0))
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::NONE)),
-        r,
-    );
-}
-fn setup(f: &mut Frame, a: &App, r: Rect, step: u8) {
-    let title = match step {
-        0 => "Select provider",
-        1 => "API key",
-        2 => "Your name",
-        3 => "Invalid configuration",
-        _ => "Setup",
-    };
-    let text = match step {
-        0 => PROVIDERS
-            .iter()
-            .enumerate()
-            .map(|(i, p)| format!("{} {}", if i == a.provider { ">" } else { " " }, p.name))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        1 => "Paste your API key, then press Enter.".into(),
-        2 => "Enter the name Term Code should call you.".into(),
-        3 => a
-            .error
-            .clone()
-            .unwrap_or_else(|| "Invalid Config.json".into()),
-        _ => String::new(),
-    };
-    f.render_widget(
-        Paragraph::new(text).block(
-            Block::default()
-                .borders(Borders::NONE)
-                .title(Span::styled(title, Style::default().cyan().bold())),
-        ),
-        r,
-    );
-}
-fn list(f: &mut Frame, v: &[String], st: &ListState, r: Rect, title: &str) {
-    let mut s = st.clone();
-    f.render_stateful_widget(
-        List::new(
-            v.iter()
-                .map(|x| ListItem::new(x.clone()))
-                .collect::<Vec<_>>(),
-        )
-        .highlight_symbol("› ")
-        .block(
-            Block::default()
-                .borders(Borders::NONE)
-                .title(Span::styled(title, Style::default().cyan().bold())),
-        ),
-        r,
-        &mut s,
-    );
 }
