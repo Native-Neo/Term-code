@@ -4,9 +4,9 @@ mod ui;
 
 use chrono::{Local, Timelike};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, EnableMouseCapture, LeaveAlternateScreen, DisableMouseCapture},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures_util::{Stream, StreamExt};
 use ratatui::{prelude::*, widgets::ListState};
@@ -33,94 +33,24 @@ pub struct App {
     pub scroll: u16, pub request_id: u64, pub cwd: PathBuf, pub tool_calls: Vec<tools::ToolCall>, pub tools_expanded: bool,
     pub tool_click_y: Cell<u16>,
 }
-
 impl App {
     fn new(config: Config, setup: bool, error: Option<String>) -> Self {
-        let provider = PROVIDERS.iter().position(|p| p.id == config.provider).unwrap_or(0);
-        let name = config.user_name.clone();
-        let mode = if error.is_some() { Mode::Setup(3) } else if setup { Mode::Setup(0) } else { Mode::Chat };
-        let status = if error.is_some() { "Fix Config.json and restart".into() } else if setup { "Choose a provider".into() } else { "Ready".into() };
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self { config, messages:Vec::new(), input:String::new(), input_cursor:0, input_anchor:None, status, error, busy:false, mode, provider, models:Vec::new(), model_state:ListState::default(), provider_state:ListState::default(), api_input:String::new(), name_input:name.clone().unwrap_or_default(), greeting:greeting(name.as_deref()), scroll:0, request_id:0, cwd, tool_calls:Vec::new(), tools_expanded:false, tool_click_y:Cell::new(0) }
+        let provider=PROVIDERS.iter().position(|p|p.id==config.provider).unwrap_or(0); let name=config.user_name.clone();
+        let mode=if error.is_some(){Mode::Setup(3)}else if setup{Mode::Setup(0)}else{Mode::Chat}; let status=if error.is_some(){"Fix Config.json and restart".into()}else if setup{"Choose a provider".into()}else{"Ready".into()}; let cwd=std::env::current_dir().unwrap_or_else(|_|PathBuf::from("."));
+        Self{config,messages:Vec::new(),input:String::new(),input_cursor:0,input_anchor:None,status,error,busy:false,mode,provider,models:Vec::new(),model_state:ListState::default(),provider_state:ListState::default(),api_input:String::new(),name_input:name.clone().unwrap_or_default(),greeting:greeting(name.as_deref()),scroll:0,request_id:0,cwd,tool_calls:Vec::new(),tools_expanded:false,tool_click_y:Cell::new(0)}
     }
-    fn save(&self) -> Result<(),String> {
-        let dir=home().join(DIR); fs::create_dir_all(&dir).map_err(|e|e.to_string())?; let path=dir.join(FILE);
-        fs::write(&path,serde_json::to_string_pretty(&self.config).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; fs::set_permissions(path,fs::Permissions::from_mode(0o600)).map_err(|e|e.to_string())?; }
-        Ok(())
-    }
+    fn save(&self)->Result<(),String>{let dir=home().join(DIR);fs::create_dir_all(&dir).map_err(|e|e.to_string())?;let path=dir.join(FILE);fs::write(&path,serde_json::to_string_pretty(&self.config).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;#[cfg(unix)]{use std::os::unix::fs::PermissionsExt;fs::set_permissions(path,fs::Permissions::from_mode(0o600)).map_err(|e|e.to_string())?;}Ok(())}
 }
-fn home()->PathBuf { std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||".".into()) }
-fn load()->Result<Option<Config>,String> {
-    let p=home().join(DIR).join(FILE); if !p.exists(){return Ok(None)}
-    let c:Config=serde_json::from_str(&fs::read_to_string(p).map_err(|e|e.to_string())?).map_err(|e|format!("Wrong Config.json formatting: {e}"))?;
-    if c.provider.trim().is_empty()||c.api_key.trim().is_empty(){return Err("Wrong Config.json formatting: provider and api_key are required".into())}
-    if !PROVIDERS.iter().any(|p|p.id==c.provider){return Err(format!("Wrong Config.json formatting: unsupported provider {}",c.provider))} Ok(Some(c))
-}
-fn greeting(name:Option<&str>)->String {
-    let n=name.map(|x|format!(", {x}")).unwrap_or_default(); let h=Local::now().hour();
-    let v=if h<12{[format!("Good morning{n}."),format!("What should we work on{n}?")]}else if h<18{[format!("Good afternoon{n}."),format!("What should we do{n}?")]}else{[format!("Good evening{n}."),format!("Good to see you back{n}.")]};
-    v[(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as usize)%2].clone()
-}
+fn home()->PathBuf{std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||".".into())}
+fn load()->Result<Option<Config>,String>{let p=home().join(DIR).join(FILE);if !p.exists(){return Ok(None)}let c:Config=serde_json::from_str(&fs::read_to_string(p).map_err(|e|e.to_string())?).map_err(|e|format!("Wrong Config.json formatting: {e}"))?;if c.provider.trim().is_empty()||c.api_key.trim().is_empty(){return Err("Wrong Config.json formatting: provider and api_key are required".into())}if !PROVIDERS.iter().any(|p|p.id==c.provider){return Err(format!("Wrong Config.json formatting: unsupported provider {}",c.provider))}Ok(Some(c))}
+fn greeting(name:Option<&str>)->String{let n=name.map(|x|format!(", {x}")).unwrap_or_default();let h=Local::now().hour();let v=if h<12{[format!("Good morning{n}."),format!("What should we work on{n}?")]}else if h<18{[format!("Good afternoon{n}."),format!("What should we do{n}?")]}else{[format!("Good evening{n}."),format!("Good to see you back{n}.")]};v[(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()as usize)%2].clone()}
 
-#[tokio::main] async fn main()->Result<(),Box<dyn std::error::Error>> {
-    let (config,setup,error)=match load(){Ok(Some(c))=>(c,false,None),Ok(None)=>(Config{provider:PROVIDERS[0].id.into(),api_key:String::new(),model:None,user_name:None},true,None),Err(e)=>(Config{provider:PROVIDERS[0].id.into(),api_key:String::new(),model:None,user_name:None},false,Some(e))};
-    let mut app=App::new(config,setup,error); if app.error.is_none()&&!setup {if let Err(e)=load_models(&mut app).await{app.error=Some(e);app.status="Model discovery failed".into();}}
-    let(tx,rx)=mpsc::channel(); run(&mut app,tx,rx)?; Ok(())
-}
-fn run(app:&mut App,tx:mpsc::Sender<EventMsg>,rx:mpsc::Receiver<EventMsg>)->io::Result<()> {
-    enable_raw_mode()?; let mut out=io::stdout(); execute!(out,EnterAlternateScreen,EnableMouseCapture)?; let mut term=Terminal::new(CrosstermBackend::new(out))?;
-    let result=loop_app(&mut term,app,tx,rx); disable_raw_mode()?; execute!(term.backend_mut(),LeaveAlternateScreen,DisableMouseCapture)?; term.show_cursor()?; result
-}
-fn loop_app<B:Backend>(term:&mut Terminal<B>,app:&mut App,tx:mpsc::Sender<EventMsg>,rx:mpsc::Receiver<EventMsg>)->io::Result<()> {
-    loop {
-        while let Ok(e)=rx.try_recv(){match e{
-            EventMsg::Chunk(id,s) if id==app.request_id=>{if let Some(m)=app.messages.last_mut(){m.content.push_str(&s);app.scroll=0;}}
-            EventMsg::Done(id) if id==app.request_id=>{
-                app.busy=false;app.status="Ready".into();
-                if let Some(last)=app.messages.last().cloned(){if last.role=="assistant"{if let Some(tc)=tools::parse_tool_call(&last.content){
-                    app.tool_calls.push(tc.clone());
-                    if tc.tool=="spawn_subagent"{let task=tc.args["task"].as_str().unwrap_or("subtask").to_string();app.busy=true;app.status=format!("Subagent running: {task}");tools::spawn_subagent_task(app.config.clone(),task,app.cwd.clone(),tx.clone(),app.request_id)}
-                    else{app.status=format!("Executing tool {}...",tc.tool);let result=match tools::execute_tool(&app.cwd,&tc){Ok(o)=>format!("[TOOL RESULT] ({})\n{o}",tc.tool),Err(e)=>format!("[TOOL ERROR] ({})\n{e}",tc.tool)};app.messages.push(Msg{role:"system".into(),content:result});send_followup(app,&tx)}
-                }}}}
-            }
-            EventMsg::Error(id,e) if id==app.request_id=>{app.busy=false;app.error=Some(e);app.status="Error".into();if app.messages.last().is_some_and(|m|m.role=="assistant"&&m.content.trim().is_empty()){app.messages.pop();}}
-            EventMsg::Models(id,v) if id==app.request_id=>{app.models=v;app.model_state.select((!app.models.is_empty()).then_some(0));app.busy=false;app.status="Ready".into();choose_model(app)}
-            _=>{}
-        }}
-        term.draw(|f|ui::draw(f,app))?;
-        if event::poll(Duration::from_millis(40))? {match event::read()? {Event::Key(k)=>{if key(app,k,&tx){break}},Event::Mouse(m)=>{if m.kind==MouseEventKind::Down(MouseButton::Left)&&m.row==app.tool_click_y.get(){app.tools_expanded=!app.tools_expanded;}},_=>{}}}
-    } Ok(())
-}
-
+#[tokio::main]async fn main()->Result<(),Box<dyn std::error::Error>>{let(config,setup,error)=match load(){Ok(Some(c))=>(c,false,None),Ok(None)=>(Config{provider:PROVIDERS[0].id.into(),api_key:String::new(),model:None,user_name:None},true,None),Err(e)=>(Config{provider:PROVIDERS[0].id.into(),api_key:String::new(),model:None,user_name:None},false,Some(e))};let mut app=App::new(config,setup,error);if app.error.is_none()&&!setup{if let Err(e)=load_models(&mut app).await{app.error=Some(e);app.status="Model discovery failed".into()}}let(tx,rx)=mpsc::channel();run(&mut app,tx,rx)?;Ok(())}
+fn run(app:&mut App,tx:mpsc::Sender<EventMsg>,rx:mpsc::Receiver<EventMsg>)->io::Result<()>{enable_raw_mode()?;let mut out=io::stdout();execute!(out,EnterAlternateScreen,EnableMouseCapture)?;let mut term=Terminal::new(CrosstermBackend::new(out))?;let result=loop_app(&mut term,app,tx,rx);disable_raw_mode()?;execute!(term.backend_mut(),LeaveAlternateScreen,DisableMouseCapture)?;term.show_cursor()?;result}
+fn loop_app<B:Backend>(term:&mut Terminal<B>,app:&mut App,tx:mpsc::Sender<EventMsg>,rx:mpsc::Receiver<EventMsg>)->io::Result<()>{loop{while let Ok(e)=rx.try_recv(){match e{EventMsg::Chunk(id,s)if id==app.request_id=>{if let Some(m)=app.messages.last_mut(){m.content.push_str(&s);app.scroll=0}},EventMsg::Done(id)if id==app.request_id=>{app.busy=false;app.status="Ready".into();if let Some(last)=app.messages.last().cloned(){if last.role=="assistant"{if let Some(tc)=tools::parse_tool_call(&last.content){app.tool_calls.push(tc.clone());if tc.tool=="spawn_subagent"{let task=tc.args["task"].as_str().unwrap_or("subtask").to_string();app.busy=true;app.status=format!("Subagent running: {task}");tools::spawn_subagent_task(app.config.clone(),task,app.cwd.clone(),tx.clone(),app.request_id)}else{app.status=format!("Executing tool {}...",tc.tool);let result=match tools::execute_tool(&app.cwd,&tc){Ok(o)=>format!("[TOOL RESULT] ({})\n{o}",tc.tool),Err(e)=>format!("[TOOL ERROR] ({})\n{e}",tc.tool)};app.messages.push(Msg{role:"system".into(),content:result});send_followup(app,&tx)}}}}}},EventMsg::Error(id,e)if id==app.request_id=>{app.busy=false;app.error=Some(e);app.status="Error".into();if app.messages.last().is_some_and(|m|m.role=="assistant"&&m.content.trim().is_empty()){app.messages.pop()}},EventMsg::Models(id,v)if id==app.request_id=>{app.models=v;app.model_state.select((!app.models.is_empty()).then_some(0));app.busy=false;app.status="Ready".into();choose_model(app)},_=>{}}}term.draw(|f|ui::draw(f,app))?;if event::poll(Duration::from_millis(40))?{match event::read()?{Event::Key(k)=>{if key(app,k,&tx){break}},Event::Mouse(m)=>{if m.kind==MouseEventKind::Down(MouseButton::Left)&&m.row==app.tool_click_y.get(){app.tools_expanded=!app.tools_expanded}},_=>{}}}}Ok(())}
 fn tab_complete(input:&mut String){if !input.starts_with('/'){return}let c=["/model","/provider","/config","/clear","/new","/quit","/exit","/help"];let cur=input.trim().to_lowercase();if cur=="/"{*input=c[0].into();return}if let Some(i)=c.iter().position(|x|*x==cur){*input=c[(i+1)%c.len()].into();return}if let Some(x)=c.iter().find(|x|x.starts_with(&cur)){*input=(*x).into()}}
-fn chars(s:&str)->Vec<char>{s.chars().collect()}
-fn byte_pos(s:&str,n:usize)->usize{s.char_indices().nth(n).map(|x|x.0).unwrap_or(s.len())}
-fn clear_selection(a:&mut App){a.input_anchor=None}
-fn selected_range(a:&App)->Option<(usize,usize)>{a.input_anchor.map(|x|(x.min(a.input_cursor),x.max(a.input_cursor))).filter(|x|x.0!=x.1)}
-fn delete_selection(a:&mut App)->bool{if let Some((x,y))=selected_range(a){let mut c=chars(&a.input);c.drain(x..y);a.input=c.into_iter().collect();a.input_cursor=x;clear_selection(a);true}else{false}}
-fn move_cursor(a:&mut App,target:usize,select:bool){if select{if a.input_anchor.is_none(){a.input_anchor=Some(a.input_cursor)}}else{clear_selection(a)}a.input_cursor=target.min(a.input.chars().count())}
-fn word_left(s:&str,n:usize)->usize{let c=chars(s);let mut i=n;while i>0&&c[i-1].is_whitespace(){i-=1}while i>0&&!c[i-1].is_whitespace(){i-=1}i}
-fn word_right(s:&str,n:usize)->usize{let c=chars(s);let mut i=n;while i<c.len()&&c[i].is_whitespace(){i+=1}while i<c.len()&&!c[i].is_whitespace(){i+=1}i}
-fn key(a:&mut App,k:KeyEvent,tx:&mpsc::Sender<EventMsg>)->bool{
-    if k.code==KeyCode::Char('c')&&k.modifiers.contains(KeyModifiers::CONTROL){return true}
-    match a.mode{Mode::Setup(s)=>return setup_key(a,k,s,tx),Mode::Models=>{model_key(a,k);return false},Mode::Providers=>{provider_key(a,k);return false},Mode::Chat=>{}}
-    if matches!(k.code,KeyCode::Tab|KeyCode::BackTab){if a.input.starts_with('/'){tab_complete(&mut a.input);a.input_cursor=a.input.chars().count();clear_selection(a)}return false}
-    if k.code==KeyCode::Enter{if a.input.starts_with('/'){return command(a,tx)}if !a.busy&&!a.input.trim().is_empty(){send(a,tx)}return false}
-    let select=k.modifiers.contains(KeyModifiers::SHIFT);let ctrl=k.modifiers.contains(KeyModifiers::CONTROL);
-    match k.code{
-        KeyCode::Esc if a.busy=>{a.request_id=a.request_id.wrapping_add(1);a.busy=false;a.status="Cancelled".into()}
-        KeyCode::Esc=>{a.input.clear();a.input_cursor=0;clear_selection(a)}
-        KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}}
-        KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}}
-        KeyCode::Left=>move_cursor(a,if ctrl{word_left(&a.input,a.input_cursor)}else{a.input_cursor.saturating_sub(1)},select),
-        KeyCode::Right=>move_cursor(a,if ctrl{word_right(&a.input,a.input_cursor)}else{(a.input_cursor+1).min(a.input.chars().count())},select),
-        KeyCode::Home=>move_cursor(a,0,select),KeyCode::End=>move_cursor(a,a.input.chars().count(),select),
-        KeyCode::Up if a.input.is_empty()=>a.scroll=a.scroll.saturating_add(1),KeyCode::Down if a.input.is_empty()=>a.scroll=a.scroll.saturating_sub(1),
-        KeyCode::PageUp=>a.scroll=a.scroll.saturating_add(10),KeyCode::PageDown=>a.scroll=a.scroll.saturating_sub(10),
-        KeyCode::Char(c) if !ctrl=>{delete_selection(a);let p=byte_pos(&a.input,a.input_cursor);a.input.insert(p,c);a.input_cursor+=1},_=>{}
-    } false
-}
+fn chars(s:&str)->Vec<char>{s.chars().collect()}fn byte_pos(s:&str,n:usize)->usize{s.char_indices().nth(n).map(|x|x.0).unwrap_or(s.len())}fn clear_selection(a:&mut App){a.input_anchor=None}fn selected_range(a:&App)->Option<(usize,usize)>{a.input_anchor.map(|x|(x.min(a.input_cursor),x.max(a.input_cursor))).filter(|x|x.0!=x.1)}fn delete_selection(a:&mut App)->bool{if let Some((x,y))=selected_range(a){let mut c=chars(&a.input);c.drain(x..y);a.input=c.into_iter().collect();a.input_cursor=x;clear_selection(a);true}else{false}}fn move_cursor(a:&mut App,target:usize,select:bool){if select{if a.input_anchor.is_none(){a.input_anchor=Some(a.input_cursor)}}else{clear_selection(a)}a.input_cursor=target.min(a.input.chars().count())}fn word_left(s:&str,n:usize)->usize{let c=chars(s);let mut i=n;while i>0&&c[i-1].is_whitespace(){i-=1}while i>0&&!c[i-1].is_whitespace(){i-=1}i}fn word_right(s:&str,n:usize)->usize{let c=chars(s);let mut i=n;while i<c.len()&&c[i].is_whitespace(){i+=1}while i<c.len()&&!c[i].is_whitespace(){i+=1}i}
+fn key(a:&mut App,k:KeyEvent,tx:&mpsc::Sender<EventMsg>)->bool{if k.code==KeyCode::Char('c')&&k.modifiers.contains(KeyModifiers::CONTROL){return true}match a.mode{Mode::Setup(s)=>return setup_key(a,k,s,tx),Mode::Models=>{model_key(a,k);return false},Mode::Providers=>{provider_key(a,k);return false},Mode::Chat=>{}}if matches!(k.code,KeyCode::Tab|KeyCode::BackTab){if a.input.starts_with('/'){tab_complete(&mut a.input);a.input_cursor=a.input.chars().count();clear_selection(a)}return false}if k.code==KeyCode::Enter{if a.input.starts_with('/'){return command(a,tx)}if !a.busy&&!a.input.trim().is_empty(){send(a,tx)}return false}let select=k.modifiers.contains(KeyModifiers::SHIFT);let ctrl=k.modifiers.contains(KeyModifiers::CONTROL);match k.code{KeyCode::Esc if a.busy=>{a.request_id=a.request_id.wrapping_add(1);a.busy=false;a.status="Cancelled".into()},KeyCode::Esc=>{a.input.clear();a.input_cursor=0;clear_selection(a)},KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}},KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}},KeyCode::Left=>move_cursor(a,if ctrl{word_left(&a.input,a.input_cursor)}else{a.input_cursor.saturating_sub(1)},select),KeyCode::Right=>move_cursor(a,if ctrl{word_right(&a.input,a.input_cursor)}else{(a.input_cursor+1).min(a.input.chars().count())},select),KeyCode::Home=>move_cursor(a,0,select),KeyCode::End=>move_cursor(a,a.input.chars().count(),select),KeyCode::Up if a.input.is_empty()=>a.scroll=a.scroll.saturating_add(1),KeyCode::Down if a.input.is_empty()=>a.scroll=a.scroll.saturating_sub(1),KeyCode::PageUp=>a.scroll=a.scroll.saturating_add(10),KeyCode::PageDown=>a.scroll=a.scroll.saturating_sub(10),KeyCode::Char(c)if !ctrl=>{delete_selection(a);let p=byte_pos(&a.input,a.input_cursor);a.input.insert(p,c);a.input_cursor+=1},_=>{}}false}
 fn setup_key(a:&mut App,k:KeyEvent,s:u8,tx:&mpsc::Sender<EventMsg>)->bool{match s{0=>match k.code{KeyCode::Up=>a.provider=a.provider.saturating_sub(1),KeyCode::Down=>a.provider=(a.provider+1).min(PROVIDERS.len()-1),KeyCode::Enter=>{a.mode=Mode::Setup(1);a.status="Paste your API key".into()},KeyCode::Esc=>return true,_=>{}},1=>match k.code{KeyCode::Enter if !a.api_input.trim().is_empty()=>{a.mode=Mode::Setup(2);a.status="What should I call you?".into()},KeyCode::Esc=>a.mode=Mode::Setup(0),KeyCode::Backspace=>{a.api_input.pop()},KeyCode::Char(c)=>a.api_input.push(c),_=>{}},2=>match k.code{KeyCode::Enter=>{a.config.provider=PROVIDERS[a.provider].id.into();a.config.api_key=a.api_input.trim().into();a.config.user_name=(!a.name_input.trim().is_empty()).then(||a.name_input.trim().into());a.config.model=None;if let Err(e)=a.save(){a.error=Some(e);a.status="Config save failed".into();return false}a.error=None;a.greeting=greeting(a.config.user_name.as_deref());a.models.clear();a.mode=Mode::Chat;a.status="Loading models...".into();refresh_async(a,tx.clone())},KeyCode::Esc=>a.mode=Mode::Setup(1),KeyCode::Backspace=>{a.name_input.pop()},KeyCode::Char(c)=>a.name_input.push(c),_=>{}},3=>return matches!(k.code,KeyCode::Esc|KeyCode::Char('q')|KeyCode::Char('Q')),_=>{}}false}
 fn command(a:&mut App,tx:&mpsc::Sender<EventMsg>)->bool{let c=a.input.trim().to_lowercase();a.input.clear();a.input_cursor=0;clear_selection(a);match c.as_str(){"/help"=>a.status="/model /provider /config /new /clear /quit".into(),"/model"=>{a.mode=Mode::Models;if a.models.is_empty(){refresh_async(a,tx.clone())}},"/provider"=>{a.provider_state.select(Some(a.provider));a.mode=Mode::Providers},"/config"=>a.status=format!("Provider: {} | Model: {} | API key: configured",PROVIDERS[a.provider].name,a.config.model.as_deref().unwrap_or("auto")),"/new"|"/clear"=>{a.messages.clear();a.tool_calls.clear();a.scroll=0},"/quit"|"/exit"=>return true,_=>a.status=format!("Unknown command: {c}")}false}
 fn model_key(a:&mut App,k:KeyEvent){match k.code{KeyCode::Esc=>a.mode=Mode::Chat,KeyCode::Up=>a.model_state.select(Some(a.model_state.selected().unwrap_or(0).saturating_sub(1))),KeyCode::Down=>{let i=a.model_state.selected().unwrap_or(0);if i+1<a.models.len(){a.model_state.select(Some(i+1))}},KeyCode::PageUp=>{let i=a.model_state.selected().unwrap_or(0);a.model_state.select(Some(i.saturating_sub(5)))},KeyCode::PageDown=>{let i=a.model_state.selected().unwrap_or(0);if !a.models.is_empty(){a.model_state.select(Some((i+5).min(a.models.len()-1)))}},KeyCode::Enter=>if let Some(i)=a.model_state.selected(){if let Some(m)=a.models.get(i).cloned(){a.config.model=Some(m);if let Err(e)=a.save(){a.error=Some(e)}else{a.mode=Mode::Chat}}},_=>{}}}
