@@ -4,9 +4,6 @@ on:
   push:
   pull_request:
 
-permissions:
-  contents: write
-
 jobs:
   format:
     runs-on: ubuntu-latest
@@ -15,17 +12,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Fix source files
-        run: |
-          python3 -c 'from pathlib import Path;p=Path("src/ui.rs");s=p.read_text();s=s.replace("parse_markdown_to_lines(&content, false, t)","parse_markdown_to_lines(Box::leak(content.into_boxed_str()), false, t)",1);p.write_text(s)'
-          cargo fmt --all
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/ui.rs
-          if ! git diff --cached --quiet; then git commit -m 'Fix TUI response rendering'; git fetch origin main; git rebase origin/main; git push origin HEAD:main; fi
-          python3 -c 'from pathlib import Path;p=Path("src/main.rs");s=p.read_text();s=s.replace("        KeyCode::Backspace => {","        KeyCode::Backspace if !ctrl => {",1);s=s.replace("        KeyCode::Delete => {","        KeyCode::Delete if !ctrl => {",1);p.write_text(s)'
-          cargo fmt --all
-          git add src/main.rs
-          if ! git diff --cached --quiet; then git commit -m 'Fix prompt editing controls'; git fetch origin main; git rebase origin/main; git push origin HEAD:main; fi
+        
       - run: cargo fmt --check
       - run: cargo check
