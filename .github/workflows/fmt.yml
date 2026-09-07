@@ -19,7 +19,6 @@ jobs:
         run: |
           python3 <<'PY'
           from pathlib import Path
-          import re
 
           main = Path("src/main.rs")
           s = main.read_text()
@@ -41,28 +40,17 @@ jobs:
                       for line in block.lines() {
                           let data = line.strip_prefix("data:").map(str::trim).unwrap_or("");
                           if data.is_empty() { continue; }
-                          if data == "[DONE]" {
-                              let _ = tx.send(EventMsg::Done(id));
-                              return Ok(());
-                          }
+                          if data == "[DONE]" { let _ = tx.send(EventMsg::Done(id)); return Ok(()); }
                           let Ok(v) = serde_json::from_str::<Value>(data) else { continue; };
-                          if v.pointer("/error/message").is_some() {
-                              return Err(api_error(&v, StatusCode::BAD_GATEWAY));
-                          }
+                          if v.pointer("/error/message").is_some() { return Err(api_error(&v, StatusCode::BAD_GATEWAY)); }
                           if path.is_empty() {
                               if let Some(parts) = v.pointer("/candidates/0/content/parts").and_then(Value::as_array) {
                                   for part in parts {
                                       if part.get("thought").and_then(Value::as_bool).unwrap_or(false) { continue; }
-                                      if let Some(text) = part.get("text").and_then(Value::as_str) {
-                                          received = true;
-                                          let _ = tx.send(EventMsg::Chunk(id, text.to_owned()));
-                                      }
+                                      if let Some(text) = part.get("text").and_then(Value::as_str) { received = true; let _ = tx.send(EventMsg::Chunk(id, text.to_owned())); }
                                   }
                               }
-                          } else if let Some(text) = v.pointer(path).and_then(Value::as_str) {
-                              received = true;
-                              let _ = tx.send(EventMsg::Chunk(id, text.to_owned()));
-                          }
+                          } else if let Some(text) = v.pointer(path).and_then(Value::as_str) { received = true; let _ = tx.send(EventMsg::Chunk(id, text.to_owned())); }
                       }
                   }
               }
@@ -71,23 +59,15 @@ jobs:
                       let data = line.strip_prefix("data:").map(str::trim).unwrap_or("");
                       if data.is_empty() || data == "[DONE]" { continue; }
                       let Ok(v) = serde_json::from_str::<Value>(data) else { continue; };
-                      if v.pointer("/error/message").is_some() {
-                          return Err(api_error(&v, StatusCode::BAD_GATEWAY));
-                      }
+                      if v.pointer("/error/message").is_some() { return Err(api_error(&v, StatusCode::BAD_GATEWAY)); }
                       if path.is_empty() {
                           if let Some(parts) = v.pointer("/candidates/0/content/parts").and_then(Value::as_array) {
                               for part in parts {
                                   if part.get("thought").and_then(Value::as_bool).unwrap_or(false) { continue; }
-                                  if let Some(text) = part.get("text").and_then(Value::as_str) {
-                                      received = true;
-                                      let _ = tx.send(EventMsg::Chunk(id, text.to_owned()));
-                                  }
+                                  if let Some(text) = part.get("text").and_then(Value::as_str) { received = true; let _ = tx.send(EventMsg::Chunk(id, text.to_owned())); }
                               }
                           }
-                      } else if let Some(text) = v.pointer(path).and_then(Value::as_str) {
-                          received = true;
-                          let _ = tx.send(EventMsg::Chunk(id, text.to_owned()));
-                      }
+                      } else if let Some(text) = v.pointer(path).and_then(Value::as_str) { received = true; let _ = tx.send(EventMsg::Chunk(id, text.to_owned())); }
                   }
               }
               if !received { return Err("Model stream ended without a response".into()); }
@@ -96,13 +76,8 @@ jobs:
           }
           '''
           s = s[:start] + sse + s[end:]
-
-          old = '''KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}},'''
-          new = '''KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let end=a.input_cursor;let start=if ctrl{word_left(&a.input,end)}else{end-1};let mut c=chars(&a.input);c.drain(start..end);a.input=c.into_iter().collect();a.input_cursor=start}},'''
-          s = s.replace(old, new)
-          old = '''KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}},'''
-          new = '''KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let end=if ctrl{word_right(&a.input,a.input_cursor)}else{a.input_cursor+1};let mut c=chars(&a.input);c.drain(a.input_cursor..end);a.input=c.into_iter().collect()}},'''
-          s = s.replace(old, new)
+          s = s.replace('KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let mut c=chars(&a.input);c.remove(a.input_cursor-1);a.input=c.into_iter().collect();a.input_cursor-=1}},','KeyCode::Backspace=>{if !delete_selection(a)&&a.input_cursor>0{let end=a.input_cursor;let start=if ctrl{word_left(&a.input,end)}else{end-1};let mut c=chars(&a.input);c.drain(start..end);a.input=c.into_iter().collect();a.input_cursor=start}},')
+          s = s.replace('KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let mut c=chars(&a.input);c.remove(a.input_cursor);a.input=c.into_iter().collect()}},','KeyCode::Delete=>{if !delete_selection(a)&&a.input_cursor<a.input.chars().count(){let end=if ctrl{word_right(&a.input,a.input_cursor)}else{a.input_cursor+1};let mut c=chars(&a.input);c.drain(a.input_cursor..end);a.input=c.into_iter().collect()}},')
           marker = 'let select=k.modifiers.contains(KeyModifiers::SHIFT);let ctrl=k.modifiers.contains(KeyModifiers::CONTROL);'
           s = s.replace(marker, marker + 'if k.code==KeyCode::Char(\'a\')&&ctrl{a.input_anchor=Some(0);a.input_cursor=a.input.chars().count();return false}')
           main.write_text(s)
@@ -111,19 +86,28 @@ jobs:
           u = ui.read_text()
           old = 'f.render_widget(Paragraph::new(l).block(block).scroll((a.scroll,0)).wrap(Wrap{trim:false}),parts.0)'
           new = '''let width=parts.0.width.saturating_sub(2).max(1) as usize;let height=parts.0.height.saturating_sub(2) as usize;let visual_lines=l.iter().map(|line|((line.width().max(1)+width-1)/width).max(1)).sum::<usize>();let max_scroll=visual_lines.saturating_sub(height);let scroll=max_scroll.saturating_sub(a.scroll as usize).min(u16::MAX as usize) as u16;f.render_widget(Paragraph::new(l).block(block).scroll((scroll,0)).wrap(Wrap{trim:false}),parts.0)'''
-          if old not in u:
-              raise SystemExit("chat render pattern not found")
+          if old not in u: raise SystemExit("chat render pattern not found")
           ui.write_text(u.replace(old,new))
           PY
       - run: rustfmt src/main.rs src/ui.rs
       - run: cargo check
-      - name: Commit source
+      - name: Commit main only
         if: github.event_name == 'push'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main.rs src/ui.rs
-          if git diff --cached --quiet; then exit 0; fi
-          git diff --cached --name-only | grep -qx 'src/main.rs\|src/ui.rs'
-          git commit -m "Fix TUI input and streaming"
-          git push
+          if ! git diff --quiet -- src/main.rs; then
+            git add src/main.rs
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Fix streaming and input handling"
+            git push
+          fi
+      - name: Commit UI only
+        if: github.event_name == 'push'
+        run: |
+          if ! git diff --quiet -- src/ui.rs; then
+            git add src/ui.rs
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Fix chat auto-scroll"
+            git push
+          fi
