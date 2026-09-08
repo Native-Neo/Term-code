@@ -16,6 +16,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match app.mode {
         Mode::Models => draw_models_modal(f, app, c[1], &theme),
         Mode::Providers => draw_providers_modal(f, app, c[1], &theme),
+        Mode::Conversations => draw_conversations_modal(f, app, c[1], &theme),
         Mode::Setup(s) => draw_setup_modal(f, app, c[1], s, &theme),
         Mode::Chat => {}
     }
@@ -469,6 +470,70 @@ fn draw_providers_modal(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
     let mut s = a.provider_state.clone();
     f.render_stateful_widget(w, x, &mut s)
 }
+fn draw_conversations_modal(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
+    let x = centered_rect(75, 75, r);
+    f.render_widget(Clear, x);
+    if a.conversations.is_empty() {
+        let w = Paragraph::new(Line::from(Span::styled(
+            "  No saved conversations yet.",
+            Style::default().fg(t.text_muted),
+        )))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(t.border_active))
+                .title(Span::styled(
+                    " [ Conversations ] ",
+                    Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+                )),
+        );
+        f.render_widget(w, x);
+        return;
+    }
+    let i = a
+        .conversations
+        .iter()
+        .map(|c| {
+            let is_current = a.conversation_id.as_deref() == Some(c.id.as_str());
+            let mut spans = vec![Span::styled(
+                format!("  {} ", c.title),
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+            )];
+            if is_current {
+                spans.push(Span::styled(
+                    "[OK] Current  ",
+                    Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+                ));
+            }
+            spans.push(Span::styled(
+                format!("({})  {}", c.model, crate::format_ts(c.updated_at)),
+                Style::default().fg(t.text_muted),
+            ));
+            ListItem::new(Line::from(spans))
+        })
+        .collect::<Vec<_>>();
+    let w = List::new(i)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(t.border_active))
+                .title(Span::styled(
+                    format!(" [ Conversations ({}) ] ", a.conversations.len()),
+                    Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+                )),
+        )
+        .highlight_symbol(" > ")
+        .highlight_style(
+            Style::default()
+                .bg(t.primary)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut s = a.conversation_state.clone();
+    f.render_stateful_widget(w, x, &mut s)
+}
 fn draw_setup_modal(f: &mut Frame, a: &App, r: Rect, s: u8, t: &Theme) {
     let x = centered_rect(65, 75, r);
     f.render_widget(Clear, x);
@@ -757,6 +822,28 @@ fn draw_footer(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
                 Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Quit", Style::default().fg(t.text_muted)),
+        ],
+        Mode::Conversations => vec![
+            Span::styled(
+                " [Enter]",
+                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Load  | ", Style::default().fg(t.text_muted)),
+            Span::styled(
+                "[d]",
+                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Delete  | ", Style::default().fg(t.text_muted)),
+            Span::styled(
+                "[Up/Down]",
+                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Navigate  | ", Style::default().fg(t.text_muted)),
+            Span::styled(
+                "[Esc]",
+                Style::default().fg(t.primary).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Back", Style::default().fg(t.text_muted)),
         ],
         Mode::Chat => vec![
             Span::styled(
