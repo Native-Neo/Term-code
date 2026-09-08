@@ -274,7 +274,7 @@ fn draw_chat(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
-                l.extend(parse_markdown_to_lines(msg.content.clone(), true, t))
+                l.extend(parse_markdown_to_lines(&msg.content, true, t))
             } else if msg.role == "system" {
                 l.push(Line::from(vec![
                     Span::styled(
@@ -289,7 +289,7 @@ fn draw_chat(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
-                l.extend(parse_markdown_to_lines(msg.content.clone(), false, t))
+                l.extend(parse_markdown_to_lines(&msg.content, false, t))
             } else {
                 l.push(Line::from(vec![
                     Span::styled(
@@ -314,9 +314,9 @@ fn draw_chat(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
                             content.replace_range(start..start + 3 + end + 3, "")
                         }
                     }
-                    l.extend(parse_markdown_to_lines(content, false, t))
+                    l.extend(parse_markdown_to_lines(&content, false, t))
                 } else {
-                    l.extend(parse_markdown_to_lines(msg.content.clone(), false, t))
+                    l.extend(parse_markdown_to_lines(&msg.content, false, t))
                 }
             }
         }
@@ -791,15 +791,14 @@ fn draw_footer(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
     };
     f.render_widget(Paragraph::new(Line::from(s)), r)
 }
-fn parse_markdown_to_lines(content: String, is_user: bool, t: &Theme) -> Vec<Line<'static>> {
+fn parse_markdown_to_lines(content: &str, is_user: bool, t: &Theme) -> Vec<Line<'static>> {
     let mut l = Vec::new();
     let mut code = false;
-    let owned_lines: Vec<String> = content.lines().map(str::to_owned).collect();
-    for line in owned_lines {
+    for line in content.lines() {
         if is_user {
             l.push(Line::from(vec![
                 Span::raw("   "),
-                Span::styled(line.clone(), Style::default().fg(t.text)),
+                Span::styled(line.to_owned(), Style::default().fg(t.text)),
             ]));
             continue;
         }
