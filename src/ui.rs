@@ -322,10 +322,12 @@ fn draw_chat(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
         }
         let width = parts.0.width.saturating_sub(2).max(1) as usize;
         let height = parts.0.height.saturating_sub(2) as usize;
-        let visual_lines = l
-            .iter()
-            .map(|line| ((line.width().max(1) + width - 1) / width).max(1))
-            .sum::<usize>();
+        // Use ratatui's real word-wrap algorithm to count rows, not a naive width/line.width()
+        // division -- word-wrap almost always uses more rows than that division assumes, which
+        // was making max_scroll too small and leaving the tail of long replies unreachable.
+        let visual_lines = Paragraph::new(l.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width as u16);
         let max_scroll = visual_lines.saturating_sub(height);
         let scroll = max_scroll
             .saturating_sub(a.scroll as usize)
