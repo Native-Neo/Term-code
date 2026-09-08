@@ -15,12 +15,22 @@ pub struct ToolCall {
     pub args: Value,
 }
 
-pub fn system_prompt(cwd: &Path) -> String {
+pub fn system_prompt(cwd: &Path, allow_subagents: bool) -> String {
+    let subagent_tool = if allow_subagents {
+        "\n6. `spawn_subagent` - Spin up a subagent to work on a subtask in parallel.\n   args: { \"task\": \"description of task for subagent\" }\n"
+    } else {
+        ""
+    };
+    let subagent_guideline = if allow_subagents {
+        "\n- For heavy or multi-part tasks, use `spawn_subagent` to break down work."
+    } else {
+        "\n- You are a subagent handling one focused subtask; you do NOT have the spawn_subagent tool, so complete this task directly with the other tools instead of trying to delegate further."
+    };
     format!(
         r#"You are Term-Code Agent, an advanced AI developer CLI operating inside directory: `{}`.
 You have FULL ACCESS to this directory and all subfolders/files.
 
-You can inspect code, read/write files, execute shell commands, search the codebase, and spawn subagents for multi-tasking.
+You can inspect code, read/write files, execute shell commands, and search the codebase{}.
 
 When you need to interact with the workspace or execute commands, output a JSON block with your tool call.
 Use EXACTLY this JSON format in a code block:
@@ -48,16 +58,13 @@ AVAILABLE TOOLS:
 
 5. `search` - Search for text patterns across files in the workspace.
    args: {{ "query": "struct App" }}
-
-6. `spawn_subagent` - Spin up a subagent to work on a subtask in parallel.
-   args: {{ "task": "description of task for subagent" }}
-
+{subagent_tool}
 GUIDELINES:
 - Perform workspace actions step-by-step using tools.
-- When writing or editing code, use `write_file` or `run_cmd`.
-- For heavy or multi-part tasks, use `spawn_subagent` to break down work.
+- When writing or editing code, use `write_file` or `run_cmd`.{subagent_guideline}
 - Output clear explanations alongside tool calls."#,
-        cwd.display()
+        cwd.display(),
+        if allow_subagents { ", and spawn subagents for multi-tasking" } else { "" },
     )
 }
 
@@ -319,6 +326,45 @@ fn search_dir_recursive(
     }
 }
 
+pub async fn generate_title(config: &Config, hist: &[Msg], cwd: &Path) -> Result<String, String> {
+    let snippet = hist
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .take(6)
+        .map(|m| {
+            let body: String = m.content.chars().take(300).collect();
+            format!("{}: {}", m.role, body)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = vec![Msg {
+        role: "user".to_string(),
+        content: format!(
+            "Generate a short, plain-text title (3-6 words, no quotes, no trailing \
+             punctuation, no markdown) that summarizes the following conversation. \
+             Respond with ONLY the title text and nothing else.\n\n{snippet}"
+        ),
+    }];
+    let raw = crate::request_direct(config, &prompt, cwd).await?;
+    // Defensive: if the model ignored the instructions and emitted a tool call instead of a
+    // plain title, don't use it -- fall back to the caller's default title.
+    if parse_tool_call(&raw).is_some() {
+        return Err("model returned a tool call instead of a title".into());
+    }
+    let title = raw
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .trim_matches(['"', '\'', '.'])
+        .to_string();
+    if title.is_empty() {
+        Err("model returned an empty title".into())
+    } else {
+        Ok(title)
+    }
+}
+
 pub fn spawn_subagent_task(
     config: Config,
     task_prompt: String,
@@ -351,7 +397,12 @@ pub fn spawn_subagent_task(
             }
             Err(e) => {
                 let err_msg = format!("\n[SUBAGENT ERROR] Task \"{task_prompt}\" failed: {e}\n");
-                let _ = tx.send(EventMsg::Error(request_id, err_msg));
+                // Sent as a Chunk+Done, not a top-level Error: a failed subagent shouldn't halt
+                // the whole turn. This lets the top-level model see the failure via the normal
+                // follow-up path and decide how to proceed (retry, try another approach, or
+                // just report it), the same way a failed regular tool call already does.
+                let _ = tx.send(EventMsg::Chunk(request_id, err_msg));
+                let _ = tx.send(EventMsg::Done(request_id));
             }
         }
     });
