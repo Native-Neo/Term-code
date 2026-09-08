@@ -26,6 +26,90 @@ use std::{
 
 const DIR: &str = ".nativestuff";
 const FILE: &str = "Config.json";
+const CONV_SUBDIR: &str = "conversations";
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Conversation {
+    pub id: String,
+    pub title: String,
+    pub provider: String,
+    pub model: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub messages: Vec<Msg>,
+}
+#[derive(Clone)]
+pub struct ConversationMeta {
+    pub id: String,
+    pub title: String,
+    pub model: String,
+    pub updated_at: u64,
+}
+fn conversations_dir() -> PathBuf {
+    home().join(DIR).join(CONV_SUBDIR)
+}
+fn save_conversation(conv: &Conversation) -> Result<(), String> {
+    let dir = conversations_dir();
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.json", conv.id));
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(conv).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+fn list_conversations() -> Vec<ConversationMeta> {
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(conversations_dir()) {
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(conv) = serde_json::from_str::<Conversation>(&content) {
+                    out.push(ConversationMeta {
+                        id: conv.id,
+                        title: conv.title,
+                        model: conv.model,
+                        updated_at: conv.updated_at,
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    out
+}
+fn load_conversation(id: &str) -> Result<Conversation, String> {
+    let path = conversations_dir().join(format!("{id}.json"));
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&content).map_err(|e| e.to_string())
+}
+fn delete_conversation(id: &str) -> Result<(), String> {
+    fs::remove_file(conversations_dir().join(format!("{id}.json"))).map_err(|e| e.to_string())
+}
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+pub fn format_ts(secs: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -70,16 +154,22 @@ pub const PROVIDERS: &[Provider] = &[
         name: "Zhipu AI",
     },
 ];
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Msg {
     pub role: String,
     pub content: String,
 }
+// Hard cap on subagents spawned per user turn. Subagents no longer have the spawn_subagent
+// tool themselves (see tools::system_prompt), but this cap is defense-in-depth against runaway
+// spawning if a model is asked to spawn "N subagents" and tries to do it faster than one at a
+// time, or via any other path that reaches the spawn_subagent branch repeatedly.
+const MAX_SUBAGENTS_PER_TURN: u32 = 5;
 pub enum EventMsg {
     Chunk(u64, String),
     Done(u64),
     Error(u64, String),
     Models(u64, Vec<String>),
+    Title(String, String),
 }
 #[derive(PartialEq, Eq)]
 pub enum Mode {
@@ -87,6 +177,7 @@ pub enum Mode {
     Setup(u8),
     Models,
     Providers,
+    Conversations,
 }
 
 pub struct App {
@@ -112,6 +203,13 @@ pub struct App {
     pub tool_calls: Vec<tools::ToolCall>,
     pub tools_expanded: bool,
     pub tool_click_y: Cell<u16>,
+    pub subagent_count: u32,
+    pub awaiting_subagent: bool,
+    pub conversation_id: Option<String>,
+    pub conversation_title: Option<String>,
+    pub conversation_created_at: Option<u64>,
+    pub conversations: Vec<ConversationMeta>,
+    pub conversation_state: ListState,
 }
 impl App {
     fn new(config: Config, setup: bool, error: Option<String>) -> Self {
@@ -158,6 +256,13 @@ impl App {
             tool_calls: Vec::new(),
             tools_expanded: false,
             tool_click_y: Cell::new(0),
+            subagent_count: 0,
+            awaiting_subagent: false,
+            conversation_id: None,
+            conversation_title: None,
+            conversation_created_at: None,
+            conversations: Vec::new(),
+            conversation_state: ListState::default(),
         }
     }
     fn save(&self) -> Result<(), String> {
@@ -334,12 +439,18 @@ fn loop_app<B: Backend>(
                                     });
                                     send_followup(app, &tx);
                                 }
+                            } else {
+                                // No tool call in the final reply -- this turn is truly done.
+                                // Persist the conversation now (and kick off async title
+                                // generation the first time this conversation is saved).
+                                persist_conversation(app, &tx);
                             }
                         }
                     }
                 }
                 EventMsg::Error(id, e) if id == app.request_id => {
                     app.busy = false;
+                    app.awaiting_subagent = false;
                     app.error = Some(e);
                     app.status = "Error".into();
                     if app
@@ -357,6 +468,12 @@ fn loop_app<B: Backend>(
                     app.busy = false;
                     app.status = "Ready".into();
                     choose_model(app);
+                }
+                EventMsg::Title(conv_id, title) => {
+                    if app.conversation_id.as_deref() == Some(conv_id.as_str()) {
+                        app.conversation_title = Some(title);
+                        persist_conversation(app, &tx);
+                    }
                 }
                 _ => {}
             }
@@ -390,6 +507,7 @@ fn tab_complete(input: &mut String) {
         "/model",
         "/provider",
         "/config",
+        "/conversations",
         "/clear",
         "/new",
         "/quit",
@@ -479,6 +597,10 @@ fn key(a: &mut App, k: KeyEvent, tx: &mpsc::Sender<EventMsg>) -> bool {
         }
         Mode::Providers => {
             provider_key(a, k);
+            return false;
+        }
+        Mode::Conversations => {
+            conversations_key(a, k);
             return false;
         }
         Mode::Chat => {}
@@ -647,7 +769,10 @@ fn command(a: &mut App, tx: &mpsc::Sender<EventMsg>) -> bool {
     a.input_cursor = 0;
     clear_selection(a);
     match c.as_str() {
-        "/help" => a.status = "/model /provider /config /new /clear /quit".into(),
+        "/help" => {
+            a.status =
+                "/model /provider /config /conversations /new /clear /quit".into()
+        }
         "/model" => {
             a.mode = Mode::Models;
             if a.models.is_empty() {
@@ -668,7 +793,16 @@ fn command(a: &mut App, tx: &mpsc::Sender<EventMsg>) -> bool {
         "/new" | "/clear" => {
             a.messages.clear();
             a.tool_calls.clear();
-            a.scroll = 0
+            a.scroll = 0;
+            a.conversation_id = None;
+            a.conversation_title = None;
+            a.conversation_created_at = None;
+        }
+        "/conversations" | "/history" => {
+            a.conversations = list_conversations();
+            a.conversation_state
+                .select((!a.conversations.is_empty()).then_some(0));
+            a.mode = Mode::Conversations;
         }
         "/quit" | "/exit" => return true,
         _ => a.status = format!("Unknown command: {c}"),
@@ -735,6 +869,79 @@ fn provider_key(a: &mut App, k: KeyEvent) {
         _ => {}
     }
 }
+fn conversations_key(a: &mut App, k: KeyEvent) {
+    match k.code {
+        KeyCode::Esc => a.mode = Mode::Chat,
+        KeyCode::Up => a.conversation_state.select(Some(
+            a.conversation_state
+                .selected()
+                .unwrap_or(0)
+                .saturating_sub(1),
+        )),
+        KeyCode::Down => {
+            let i = a.conversation_state.selected().unwrap_or(0);
+            if i + 1 < a.conversations.len() {
+                a.conversation_state.select(Some(i + 1))
+            }
+        }
+        KeyCode::PageUp => {
+            let i = a.conversation_state.selected().unwrap_or(0);
+            a.conversation_state.select(Some(i.saturating_sub(5)))
+        }
+        KeyCode::PageDown => {
+            let i = a.conversation_state.selected().unwrap_or(0);
+            if !a.conversations.is_empty() {
+                a.conversation_state
+                    .select(Some((i + 5).min(a.conversations.len() - 1)))
+            }
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            if let Some(i) = a.conversation_state.selected() {
+                if let Some(meta) = a.conversations.get(i).cloned() {
+                    if let Err(e) = delete_conversation(&meta.id) {
+                        a.status = format!("Delete failed: {e}");
+                    } else {
+                        a.conversations = list_conversations();
+                        let n = a.conversations.len();
+                        a.conversation_state
+                            .select((n > 0).then_some(i.min(n.saturating_sub(1))));
+                        if a.conversation_id.as_deref() == Some(meta.id.as_str()) {
+                            a.conversation_id = None;
+                            a.conversation_title = None;
+                            a.conversation_created_at = None;
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(i) = a.conversation_state.selected() {
+                if let Some(meta) = a.conversations.get(i).cloned() {
+                    match load_conversation(&meta.id) {
+                        Ok(conv) => {
+                            a.messages = conv.messages;
+                            a.tool_calls.clear();
+                            a.scroll = 0;
+                            a.conversation_id = Some(conv.id);
+                            a.conversation_title = Some(conv.title);
+                            a.conversation_created_at = Some(conv.created_at);
+                            if let Some(pi) = PROVIDERS
+                                .iter()
+                                .position(|p| p.name == conv.provider.as_str())
+                            {
+                                a.provider = pi;
+                            }
+                            a.config.model = Some(conv.model);
+                            a.mode = Mode::Chat;
+                        }
+                        Err(e) => a.status = format!("Load failed: {e}"),
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
 fn send(a: &mut App, tx: &mpsc::Sender<EventMsg>) {
     let text = a.input.trim().to_string();
     a.input.clear();
@@ -743,6 +950,7 @@ fn send(a: &mut App, tx: &mpsc::Sender<EventMsg>) {
     a.error = None;
     a.request_id = a.request_id.wrapping_add(1);
     let id = a.request_id;
+    a.subagent_count = 0;
     a.messages.push(Msg {
         role: "user".into(),
         content: text,
@@ -780,7 +988,7 @@ fn send_followup(a: &mut App, tx: &mpsc::Sender<EventMsg>) {
     let hist = a.messages.clone();
     let tx = tx.clone();
     let _ = tokio::spawn(async move {
-        if let Err(e) = request(&cfg, &cwd, &hist, tx.clone(), id).await {
+        if let Err(e) = request(&cfg, &cwd, &hist, tx.clone(), id, true).await {
             let _ = tx.send(EventMsg::Error(id, e));
         }
     });
@@ -952,11 +1160,12 @@ async fn request(
     hist: &[Msg],
     tx: mpsc::Sender<EventMsg>,
     id: u64,
+    allow_subagents: bool,
 ) -> Result<(), String> {
     match c.provider.as_str() {
-        "anthropic" => anthropic(c, cwd, hist, tx, id).await,
-        "google" => google(c, cwd, hist, tx, id).await,
-        _ => openai(c, cwd, hist, tx, id).await,
+        "anthropic" => anthropic(c, cwd, hist, tx, id, allow_subagents).await,
+        "google" => google(c, cwd, hist, tx, id, allow_subagents).await,
+        _ => openai(c, cwd, hist, tx, id, allow_subagents).await,
     }
 }
 async fn openai(
@@ -965,10 +1174,11 @@ async fn openai(
     hist: &[Msg],
     tx: mpsc::Sender<EventMsg>,
     id: u64,
+    allow_subagents: bool,
 ) -> Result<(), String> {
     let b = base(c).ok_or("Provider endpoint unavailable")?;
     let model = c.model.as_deref().ok_or("No model selected")?;
-    let mut msgs = vec![json!({"role":"system","content":tools::system_prompt(cwd)})];
+    let mut msgs = vec![json!({"role":"system","content":tools::system_prompt(cwd, allow_subagents)})];
     for m in hist {
         let role = if m.role == "system" { "user" } else { &m.role };
         msgs.push(json!({"role":role,"content":m.content}))
@@ -1029,9 +1239,10 @@ async fn google(
     hist: &[Msg],
     tx: mpsc::Sender<EventMsg>,
     id: u64,
+    allow_subagents: bool,
 ) -> Result<(), String> {
     let model = c.model.as_deref().ok_or("No model selected")?;
-    let sys = tools::system_prompt(cwd);
+    let sys = tools::system_prompt(cwd, allow_subagents);
     let contents = hist.iter().map(|m| json!({"role":if m.role == "assistant" { "model" } else { "user" },"parts":[{"text":m.content}]})).collect::<Vec<_>>();
     let h = http().await?;
     let r = h
