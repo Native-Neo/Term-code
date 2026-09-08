@@ -274,7 +274,7 @@ fn draw_chat(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
-                l.extend(parse_markdown_to_lines(&msg.content, true, t))
+                l.extend(parse_markdown_to_lines(msg.content.clone(), true, t))
             } else if msg.role == "system" {
                 l.push(Line::from(vec![
                     Span::styled(
@@ -289,7 +289,7 @@ fn draw_chat(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
-                l.extend(parse_markdown_to_lines(&msg.content, false, t))
+                l.extend(parse_markdown_to_lines(msg.content.clone(), false, t))
             } else {
                 l.push(Line::from(vec![
                     Span::styled(
@@ -314,17 +314,9 @@ fn draw_chat(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
                             content.replace_range(start..start + 3 + end + 3, "")
                         }
                     }
-                    l.extend(
-                        parse_markdown_to_lines(Box::leak(content.into_boxed_str()), false, t)
-                            .into_iter()
-                            .map(|line| line.clone()),
-                    )
+                    l.extend(parse_markdown_to_lines(content, false, t))
                 } else {
-                    l.extend(
-                        parse_markdown_to_lines(&msg.content, false, t)
-                            .into_iter()
-                            .map(|line| line.clone()),
-                    )
+                    l.extend(parse_markdown_to_lines(msg.content.clone(), false, t))
                 }
             }
         }
@@ -799,14 +791,15 @@ fn draw_footer(f: &mut Frame, a: &App, r: Rect, t: &Theme) {
     };
     f.render_widget(Paragraph::new(Line::from(s)), r)
 }
-fn parse_markdown_to_lines<'a>(content: &'a str, is_user: bool, t: &Theme) -> Vec<Line<'a>> {
+fn parse_markdown_to_lines(content: String, is_user: bool, t: &Theme) -> Vec<Line<'static>> {
     let mut l = Vec::new();
     let mut code = false;
-    for line in content.lines() {
+    let owned_lines: Vec<String> = content.lines().map(str::to_owned).collect();
+    for line in owned_lines {
         if is_user {
             l.push(Line::from(vec![
                 Span::raw("   "),
-                Span::styled(line.to_owned(), Style::default().fg(t.text)),
+                Span::styled(line.clone(), Style::default().fg(t.text)),
             ]));
             continue;
         }
@@ -910,7 +903,7 @@ fn parse_markdown_to_lines<'a>(content: &'a str, is_user: bool, t: &Theme) -> Ve
     }
     l
 }
-fn parse_inline_spans<'a>(text: &'a str, t: &Theme) -> Vec<Span<'a>> {
+fn parse_inline_spans(text: &str, t: &Theme) -> Vec<Span<'static>> {
     let mut s = Vec::new();
     for (i, p) in text.split('`').enumerate() {
         if p.is_empty() {
